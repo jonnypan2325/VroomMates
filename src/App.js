@@ -29,9 +29,9 @@ function App() {
                 lng: position.coords.longitude,
               };
 
-              infoWindow.setPosition(pos);
-              infoWindow.setContent('Location found.');
-              infoWindow.open(map);
+              //infoWindow.setPosition(pos);
+              //infoWindow.setContent('Location found.');
+              //infoWindow.open(map);
               map.setCenter(pos);
             },
             () => {
@@ -62,7 +62,7 @@ function App() {
     }
   }, []);
 
-  const [coordinates, setCoordinates] = useState(null);
+  //const [coordinates, setCoordinates] = useState(null);
   
   return (
     <div style={{ display: 'flex' }}>
