@@ -62,7 +62,7 @@ function App() {
     }
   }, []);
 
-  const [coordinates, setCoordinates] = useState(null);
+  // const [coordinates, setCoordinates] = useState(null);
   
   return (
     <div style={{ display: 'flex' }}>
