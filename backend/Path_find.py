@@ -1,5 +1,6 @@
 import math
 import heapq
+import json
 
 class Driver:
     def __init__(self,x,y,capacity, driver_num):
@@ -110,7 +111,12 @@ def assign_drivers(drivers, passengers, destination):
                 break
     return drivers
 
-
+def give_paths(passengers, drivers, destination):
+    drivers = assign_drivers(drivers, passengers, destination)
+    paths = []
+    for d in drivers:
+        paths.append(d.get_path(destination))
+    return paths
 
 if __name__ == "__main__":
     drivers = [Driver(33.6656, -117.8750, 4,0), Driver(33.6764, -117.9020,4,1)]
