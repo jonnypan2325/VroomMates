@@ -2,6 +2,7 @@ import math
 import heapq
 import json
 
+
 class Driver:
     def __init__(self,x,y,capacity, driver_num):
         self.x = x

@@ -159,7 +159,7 @@ function LocationInput({ map, directionsRenderer, setRouteData }) {
     };
 
     const sendCoordsToRouteOptimizer = async (driverCoords, passengerCoords, destCoords) => {
-        const routeOptimizerURL = 'http://localhost:5000/routeoptimizer'; // Your Flask API URL
+        const routeOptimizerURL = 'http://127.0.0.1:5000/routeoptimizer'; // Your Flask API URL
 
         const driverDataWithCoords = driverCoords.map((coords, index) => ({
             location: coords,
