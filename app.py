@@ -1,35 +1,47 @@
 from flask import Flask, request, jsonify
-from flask_cors import CORS
+from dotenv import load_dotenv
+import os
+
+load_dotenv()  # Load environment variables from .env file
 
 app = Flask(__name__)
-CORS(app)  # Enable CORS for all routes
 
 @app.route('/routeoptimizer', methods=['POST'])
-def index():
-    return jsonify({"message": "Hello from Flask on Vercel!"})
-
 def route_optimizer():
-    data = request.get_json()  # Get the JSON data sent from the frontend
+    google_maps_api_key = os.getenv('GOOGLE_MAPS_API_KEY')  # Access the API key
+    # Use google_maps_api_key in your logic as needed
+
+    data = request.get_json()
     driver_location = data.get('driverLocation')
     passenger_location = data.get('passengerLocation')
     destination = data.get('destination')
 
-    # Example: Run your Python route optimization algorithm here
-    print('Driver Location:', driver_location)
-    print('Passenger Location:', passenger_location)
-    print('Destination:', destination)
+    # Example: Just printing the data for now
+    # print("Driver Location:", driver_location)
+    # print("Passenger Location:", passenger_location)
+    # print("Destination:", destination)
 
-    # Simulate optimized route calculation (stub data for demonstration)
-    optimized_route = {
-        'driverToPassenger': {'distance': '5km', 'duration': '10 minutes'},
-        'passengerToDestination': {'distance': '15km', 'duration': '25 minutes'}
-    }
-
-    # Send back the optimized route as a JSON response
+    # PASS TO BACKEND HEREREERE
+    #             ^^return route
+    # Implement your route optimization logic here and return the result
     return jsonify({
-        'success': True,
-        'route': optimized_route
+        'status': 'success',
+        'message': 'Route optimization performed',
+        'route': 'route'
     })
 
+    # {
+    #     Driver1: {
+    #         location,
+    #         loaction,
+    #         ...
+    #     },
+    #     Driver2: {
+    #         location,
+    #         location
+    #     },
+    #     ...
+    # }
+
 if __name__ == '__main__':
-    app.run(debug=True, port=5000)  # Run the Flask app on port 5000
+    app.run(debug=True)

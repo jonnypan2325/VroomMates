@@ -1,15 +1,14 @@
 import './App.css';
-import React, { useEffect, useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import LocationInput from './LocationInput';
 
 function App() {
-  // Use state to store map and directionsRenderer
-  const [map, setMap] = useState(null);
-  const [directionsRenderer, setDirectionsRenderer] = useState(null);
+  const [map, setMap] = useState(null); // State for the Google Map instance
+  const [directionsRenderer, setDirectionsRenderer] = useState(null); // State for DirectionsRenderer instance
+  const [routeData, setRouteData] = useState(null); // State for route data
 
   useEffect(() => {
     const initMap = () => {
-      // Initialize map with default location
       const mapInstance = new window.google.maps.Map(document.getElementById('map'), {
         center: { lat: 37.784, lng: -122.403 },
         zoom: 14,
@@ -22,7 +21,6 @@ function App() {
       setMap(mapInstance);
       setDirectionsRenderer(directionsRendererInstance);
 
-      // Create a button to pan to the user's current location
       const locationButton = document.createElement('button');
       locationButton.textContent = 'Pan to Current Location';
       locationButton.classList.add('custom-map-control-button');
@@ -43,7 +41,7 @@ function App() {
             }
           );
         } else {
-          handleLocationError(false, mapInstance.getCenter(), mapInstance);
+          //handleLocationError(false, infoWindow, mapInstance.getCenter(), mapInstance);
         }
       });
     };
@@ -59,7 +57,7 @@ function App() {
       );
       infoWindow.open(mapInstance);
     };
-    
+
     // Initialize map when Google Maps is ready
     if (window.google) {
       initMap();
@@ -72,21 +70,21 @@ function App() {
     <div style={{ display: 'flex' }}>
       <div style={{ width: '30%', padding: '20px' }}>
         <h1>VroomMates</h1>
-        <p>Search for a location to get directions.</p>
-        {/* Pass map and directionsRenderer to LocationInput */}
-        <LocationInput map={map} directionsRenderer={directionsRenderer} />
+        <p>Enter locations for drivers, passengers, and destination:</p>
+
+        {/* Location Input Component */}
+        <LocationInput map={map} directionsRenderer={directionsRenderer} setRouteData={setRouteData} />
+
+        {/* Display route data */}
+        {routeData && (
+          <div>
+            <h3>Optimized Route Data</h3>
+            <pre>{JSON.stringify(routeData, null, 2)}</pre>
+          </div>
+        )}
       </div>
-      <div id="map" style={{ height: '1000px', width: '70%' }}></div>
-    </div>
-  );
-  return (
-    <div style={{ display: 'flex' }}>
-      <div style={{ width: '30%', padding: '20px' }}>
-        <h1>VroomMates</h1>
-        <p>Search for a location and get directions from your current location.</p>
-        {/* Pass map and directionsRenderer to LocationInput */}
-        <LocationInput map={map} directionsRenderer={directionsRenderer} />
-      </div>
+
+      {/* Google Map */}
       <div id="map" style={{ height: '1000px', width: '70%' }}></div>
     </div>
   );
