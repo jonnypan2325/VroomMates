@@ -1,11 +1,12 @@
 import './App.css';
-import React, { useEffect } from 'react';
+import React, { useState, useEffect } from 'react';
 import LocationInput from './LocationInput';
 
 function App() {
+  const [routeData, setRouteData] = useState(null);
+
   useEffect(() => {
     const initMap = () => {
-      // Initialize map with default location
       const map = new window.google.maps.Map(document.getElementById('map'), {
         center: { lat: 37.784, lng: -122.403 },
         zoom: 14,
@@ -13,14 +14,12 @@ function App() {
 
       const infoWindow = new window.google.maps.InfoWindow();
 
-      // Create a button to pan to the user's current location
       const locationButton = document.createElement('button');
       locationButton.textContent = 'Pan to Current Location';
       locationButton.classList.add('custom-map-control-button');
       map.controls[window.google.maps.ControlPosition.TOP_CENTER].push(locationButton);
 
       locationButton.addEventListener('click', () => {
-        // Try HTML5 geolocation
         if (navigator.geolocation) {
           navigator.geolocation.getCurrentPosition(
             (position) => {
@@ -28,10 +27,6 @@ function App() {
                 lat: position.coords.latitude,
                 lng: position.coords.longitude,
               };
-
-              infoWindow.setPosition(pos);
-              infoWindow.setContent('Location found.');
-              infoWindow.open(map);
               map.setCenter(pos);
             },
             () => {
@@ -39,7 +34,6 @@ function App() {
             }
           );
         } else {
-          // Browser doesn't support Geolocation
           handleLocationError(false, infoWindow, map.getCenter(), map);
         }
       });
@@ -62,14 +56,25 @@ function App() {
     }
   }, []);
 
-  // const [coordinates, setCoordinates] = useState(null);
-  
   return (
     <div style={{ display: 'flex' }}>
       <div style={{ width: '30%', padding: '20px' }}>
         <h1>VroomMates</h1>
-        <p>Some content on the left side of the screen.</p>
+        <p>Enter locations for drivers, passengers, and destination:</p>
+
+        {/* Location Input Component */}
+        <LocationInput setRouteData={setRouteData} />
+
+        {/* Display route data */}
+        {routeData && (
+          <div>
+            <h3>Optimized Route Data</h3>
+            <pre>{JSON.stringify(routeData, null, 2)}</pre>
+          </div>
+        )}
       </div>
+
+      {/* Google Map */}
       <div id="map" style={{ height: '1000px', width: '70%' }}></div>
     </div>
   );
