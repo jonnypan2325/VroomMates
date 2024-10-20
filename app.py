@@ -3,47 +3,31 @@ from dotenv import load_dotenv
 from flask_cors import CORS
 import os
 
-load_dotenv()  # Load environment variables from .env file
+# Load environment variables from .env file
+load_dotenv()
 
 app = Flask(__name__)
-CORS(app)
+CORS(app)  # Enable CORS after defining the app
 
 @app.route('/routeoptimizer', methods=['POST'])
 def route_optimizer():
     google_maps_api_key = os.getenv('GOOGLE_MAPS_API_KEY')  # Access the API key
-    # Use google_maps_api_key in your logic as needed
 
+    # Extract data from request
     data = request.get_json()
-    driver_location = data.get('driverLocation')
-    passenger_location = data.get('passengerLocation')
+    driver_location = data.get('drivers')
+    passenger_location = data.get('passengers')
     destination = data.get('destination')
 
-    # Example: Just printing the data for now
-    # print("Driver Location:", driver_location)
-    # print("Passenger Location:", passenger_location)
-    # print("Destination:", destination)
-
-    # PASS TO BACKEND HEREREERE
-    #             ^^return route
-    # Implement your route optimization logic here and return the result
+    # Return a sample response
     return jsonify({
         'status': 'success',
         'message': 'Route optimization performed',
-        'route': 'route'
+        'route': 'route',
+        '1': driver_location,
+        '2': passenger_location,
+        '3': destination,
     })
-
-    # {
-    #     Driver1: {
-    #         location,
-    #         loaction,
-    #         ...
-    #     },
-    #     Driver2: {
-    #         location,
-    #         location
-    #     },
-    #     ...
-    # }
 
 if __name__ == '__main__':
     app.run(debug=True)

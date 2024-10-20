@@ -111,7 +111,8 @@ def assign_drivers(drivers, passengers, destination):
                 break
     return drivers
 
-def give_paths(passengers, drivers, destination):
+def give_paths(passengers_coords, drivers_coords, destination):
+    drivers = []
     drivers = assign_drivers(drivers, passengers, destination)
     paths = []
     for d in drivers:

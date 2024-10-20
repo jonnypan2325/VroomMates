@@ -1,13 +1,54 @@
 import React, { useEffect, useState } from 'react';
 
-function LocationInput({ setCoordinates, map, directionsRenderer, setRouteData }) {
-    const [driverData, setDriverData] = useState([{ location: '', capacity: 0 }]);
-    const [passengerLocs, setPassengerLocs] = useState(['']);
-    const [destination, setDestination] = useState('');
+function LocationInput({ map, directionsRenderer, setRouteData }) {
+    const [driverData, setDriverData] = useState([
+        { address: '', capacity: 0, coordinates: { lat: null, lng: null } }
+    ]);
+    const [passengerLocs, setPassengerLocs] = useState([
+        { address: '', coordinates: { lat: null, lng: null } }
+    ]);
+    const [destination, setDestination] = useState({ address: '', coordinates: { lat: null, lng: null } });
     const [errorMessage, setErrorMessage] = useState('');
+
+    const displayRoutesForDrivers = (routes) => {
+        routes.forEach((route) => {
+            const [driver, ...passengers] = route;
+
+            const waypoints = passengers.slice(0, -1).map((location) => ({
+                location: new window.google.maps.LatLng(location.lat, location.lng),
+                stopover: true
+            }));
+
+            const finalDestination = passengers[passengers.length - 1];
+
+            const directionsService = new window.google.maps.DirectionsService();
+            directionsService.route(
+                {
+                    origin: new window.google.maps.LatLng(driver.lat, driver.lng),
+                    destination: new window.google.maps.LatLng(finalDestination.lat, finalDestination.lng),
+                    waypoints: waypoints,
+                    travelMode: window.google.maps.TravelMode.DRIVING
+                },
+                (response, status) => {
+                    if (status === 'OK') {
+                        directionsRenderer.setDirections(response); // Display the route on the map
+                    } else {
+                        console.error('Directions request failed due to ' + status);
+                    }
+                }
+            );
+        });
+    };
+
+    // useEffect(() => {
+    //     if (optimizedRoutes.length > 0) {
+    //         displayRoutesForDrivers(optimizedRoutes);
+    //     }
+    // }, [optimizedRoutes, directionsRenderer]);
 
     useEffect(() => {
         if (map && directionsRenderer) {
+            // Driver Autocomplete
             driverData.forEach((_, index) => {
                 const input = document.getElementById(`location-input-${index}`);
                 if (input) {
@@ -19,10 +60,19 @@ function LocationInput({ setCoordinates, map, directionsRenderer, setRouteData }
                             console.log("No details available for input: '" + place.name + "'");
                             return;
                         }
+                        // Update address and coordinates for the driver
+                        handleDriverChange(index, {
+                            address: place.formatted_address,
+                            coordinates: {
+                                lat: place.geometry.location.lat(),
+                                lng: place.geometry.location.lng(),
+                            }
+                        });
                     });
                 }
             });
 
+            // Passenger Autocomplete
             passengerLocs.forEach((_, index) => {
                 const input = document.getElementById(`passenger-loc-${index}`);
                 if (input) {
@@ -34,10 +84,19 @@ function LocationInput({ setCoordinates, map, directionsRenderer, setRouteData }
                             console.log("No details available for input: '" + place.name + "'");
                             return;
                         }
+                        // Update address and coordinates for the passenger
+                        handlePassengerChange(index, {
+                            address: place.formatted_address,
+                            coordinates: {
+                                lat: place.geometry.location.lat(),
+                                lng: place.geometry.location.lng(),
+                            }
+                        });
                     });
                 }
             });
 
+            // Destination Autocomplete
             const destInput = document.getElementById('destination');
             if (destInput) {
                 const destAutocomplete = new window.google.maps.places.Autocomplete(destInput);
@@ -48,14 +107,23 @@ function LocationInput({ setCoordinates, map, directionsRenderer, setRouteData }
                         console.log("No details available for destination input");
                         return;
                     }
+                    // Update address and coordinates for the destination
+                    setDestination({
+                        address: place.formatted_address,
+                        coordinates: {
+                            lat: place.geometry.location.lat(),
+                            lng: place.geometry.location.lng(),
+                        }
+                    });
                 });
             }
         }
-    }, [map, directionsRenderer, driverData]);
+    }, [map, directionsRenderer, driverData, passengerLocs]);
 
-    const handleDriverChange = (index, value) => {
+    // Handle driver changes (both address and coordinates)
+    const handleDriverChange = (index, locationData) => {
         const updatedDrivers = [...driverData];
-        updatedDrivers[index].location = value;
+        updatedDrivers[index] = { ...updatedDrivers[index], ...locationData };
         setDriverData(updatedDrivers);
     };
 
@@ -65,21 +133,22 @@ function LocationInput({ setCoordinates, map, directionsRenderer, setRouteData }
         setDriverData(updatedDrivers);
     };
 
-    const addDriverField = () => setDriverData([...driverData, { location: '', capacity: 0 }]);
+    const addDriverField = () => setDriverData([...driverData, { address: '', capacity: 0, coordinates: { lat: null, lng: null } }]);
 
-    const handlePassengerChange = (index, value) => {
+    // Handle passenger changes (both address and coordinates)
+    const handlePassengerChange = (index, locationData) => {
         const updatedPassengers = [...passengerLocs];
-        updatedPassengers[index] = value;
+        updatedPassengers[index] = { ...updatedPassengers[index], ...locationData };
         setPassengerLocs(updatedPassengers);
     };
 
-    const addPassengerField = () => setPassengerLocs([...passengerLocs, '']);
+    const addPassengerField = () => setPassengerLocs([...passengerLocs, { address: '', coordinates: { lat: null, lng: null } }]);
 
     const handleLocSubmit = async () => {
         try {
-            const driverCoords = driverData.map(driver => driver.location);
-            const passengerCoords = passengerLocs.map(passenger => passenger);
-            const destCoords = destination;
+            const driverCoords = driverData.map(driver => driver.coordinates);
+            const passengerCoords = passengerLocs.map(passenger => passenger.coordinates);
+            const destCoords = destination.coordinates;
 
             if (driverCoords && passengerCoords && destCoords) {
                 await sendCoordsToRouteOptimizer(driverCoords, passengerCoords, destCoords);
@@ -107,34 +176,14 @@ function LocationInput({ setCoordinates, map, directionsRenderer, setRouteData }
                     destination: destCoords,
                 })
             });
-
-            const data = await response.json();
-            console.log('Route optimization data: ', data);
-
-            setRouteData(data);  // Store the route data in the parent component
-
-            // Display the route using Google Maps Directions API
-            const directionsService = new window.google.maps.DirectionsService();
-
-            const locations = data[0];
-            const origin = locations[0];
-
-            locations.forEach((location) => {
-                const destination = location;
-                directionsService.route(
-                    {
-                        origin: origin,
-                        destination: destination,
-                        travelMode: window.google.maps.TravelMode.DRIVING,
-                    },
-                    (response, status) => {
-                        if (status === 'OK') {
-                            directionsRenderer.setDirections(response);  // Display the route
-                        } else {
-                            console.error(`Directions request failed due to ${status}`);
-                        }
-                    }
-                );
+            console.log("driverDataWithCoords: ", driverDataWithCoords);
+            driverDataWithCoords.forEach((driver, index) => {
+            console.log(`Driver ${index + 1} location:`, driver.location);
+            console.log(`Driver ${index + 1} capacity:`, driver.capacity);
+            
+            // once i get the route from backend this will be called
+            //const result = await response.json();
+            //return result.optimizedRoutes;
             });
         } catch (error) {
             console.error('Error sending coordinates to route optimizer:', error);
@@ -147,18 +196,18 @@ function LocationInput({ setCoordinates, map, directionsRenderer, setRouteData }
             {driverData.map((driver, index) => (
                 <div key={index}>
                     <input
-                        type="text"
-                        id={`location-input-${index}`}
-                        value={driver.location}
-                        onChange={(e) => handleDriverChange(index, e.target.value)}
-                        placeholder={`Enter driver ${index + 1} location`}
-                    />
-                    <input
                         type="number"
                         value={driver.capacity}
                         onChange={(e) => handleDriverCapacityChange(index, parseInt(e.target.value))}
                         placeholder={`Enter driver ${index + 1} capacity`}
                         min="1"
+                    />
+                    <input
+                        type="text"
+                        id={`location-input-${index}`}
+                        value={driver.address}
+                        onChange={(e) => handleDriverChange(index, { address: e.target.value, coordinates: driver.coordinates })}
+                        placeholder={`Enter driver ${index + 1} location`}
                     />
                 </div>
             ))}
@@ -170,8 +219,8 @@ function LocationInput({ setCoordinates, map, directionsRenderer, setRouteData }
                     key={index}
                     id={`passenger-loc-${index}`}
                     type="text"
-                    value={passenger}
-                    onChange={(e) => handlePassengerChange(index, e.target.value)}
+                    value={passenger.address}
+                    onChange={(e) => handlePassengerChange(index, { address: e.target.value, coordinates: passenger.coordinates })}
                     placeholder={`Enter passenger ${index + 1} location`}
                 />
             ))}
@@ -181,8 +230,8 @@ function LocationInput({ setCoordinates, map, directionsRenderer, setRouteData }
             <input
                 type="text"
                 id="destination"
-                value={destination}
-                onChange={(e) => setDestination(e.target.value)}
+                value={destination.address}
+                onChange={(e) => setDestination({ address: e.target.value, coordinates: destination.coordinates })}
                 placeholder="Enter destination"
             />
 
