@@ -20,7 +20,7 @@ class Driver:
 
     def add_passenger(self, passenger):
         self.passengers.append(passenger)
-        self.capacity = self.capacity - 1;
+        self.capacity = self.capacity - 1
 
     def get_passengers(self):
         return self.passengers

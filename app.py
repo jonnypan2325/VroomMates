@@ -1,10 +1,12 @@
 from flask import Flask, request, jsonify
 from dotenv import load_dotenv
+from flask_cors import CORS
 import os
 
 load_dotenv()  # Load environment variables from .env file
 
 app = Flask(__name__)
+CORS(app)
 
 @app.route('/routeoptimizer', methods=['POST'])
 def route_optimizer():
