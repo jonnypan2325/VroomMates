@@ -51,3 +51,106 @@
     transform: rotate(360deg);
   }
 }
+
+.driver-input-group {
+  display: flex;
+  align-items: center;
+  gap: 5px; /* Space between the inputs */
+  margin-bottom: 1px;
+}
+
+/* Passenger input group */
+.passenger-input-group {
+  margin-bottom: 1px; /* Similar spacing as driver input group */
+}
+
+input {
+  border: 2px solid #d3d3d3;
+  padding: 10px;
+  font-family: 'Comic Sans MS', 'Comic Sans', cursive;
+  border-radius: 8px;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+  margin: 1px 0;
+}
+
+input[type="number"] {
+  width: 50px; /* Narrower input for capacity */
+}
+
+select {
+  border: 2px solid #d3d3d3;
+  padding: 10px;
+  font-family: 'Comic Sans MS', 'Comic Sans', cursive;
+  border-radius: 8px;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+  margin: 1px 0;
+}
+
+.google-btn {
+  background-color: #4285f4; /* Google blue color */
+  color: white;
+  font-family: 'Comic Sans MS', 'Comic Sans', cursive;
+  border: none;
+  padding: 8px 16px; /* Smaller padding */
+  border-radius: 40px; /* Still keep rounded edges but slightly smaller */
+  font-size: 14px; /* Smaller font size */
+  cursor: pointer;
+  box-shadow: 0 3px 5px rgba(0, 0, 0, 0.1); /* Slightly smaller shadow */
+  transition: all 0.3s ease; /* Smooth transition for hover */
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px; /* Reduced space for the icon */
+}
+
+/* Hover effect */
+.google-btn:hover {
+  background-color: #357ae8; /* Darker blue on hover */
+  box-shadow: 0 5px 7px rgba(0, 0, 0, 0.2); /* Deeper shadow on hover */
+  transform: translateY(-1px); /* Slight lift on hover */
+}
+
+/* Specific styling for the logout button */
+.google-logout-btn {
+  background-color: #db4437; /* Red for log out (Google's color for delete) */
+}
+
+.google-logout-btn:hover {
+  background-color: #c23321; /* Darker red on hover */
+}
+
+/* Styling the rocket emoji or icon */
+.google-btn img,
+.google-btn span {
+  vertical-align: middle;
+}
+
+
+h1 {
+  color: #2a6eb3;
+  font-family: 'Comic Sans MS', 'Comic Sans', cursive;
+}
+
+p {
+  color: #555555;
+  font-style: italic;
+}
+
+h2 {
+  color: #6a1b9a;
+  font-family: 'Courier New, monospace';
+}
+
+h3 {
+  color: purple;
+  font-family: 'Verdana, sans-serif';
+}
+
+pre {
+  color: black;
+  font-family: 'Georgia, serif';
+}
+
+#map {
+  border-left: 1px solid #d3d3d3; /* Define a soft border between the form and map */
+}
