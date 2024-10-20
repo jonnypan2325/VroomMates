@@ -91,27 +91,27 @@ function LocationInput({ setCoordinates }) {
             });
     };
 
-//     return (
-//         <div>
-//             <h3>Driver Locations and Capacities</h3>
-//             {driverData.map((driver, index) => (
-//                 <div key={index}>
-//                     <input
-//                         type="text"
-//                         value={driver.location}
-//                         onChange={(e) => handleDriverLocationChange(index, e.target.value)}
-//                         placeholder={`Enter driver ${index + 1} location`}
-//                     />
-//                     <input
-//                         type="number"
-//                         value={driver.capacity}
-//                         onChange={(e) => handleDriverCapacityChange(index, parseInt(e.target.value))}
-//                         placeholder={`Enter driver ${index + 1} capacity`}
-//                         min="1"
-//                     />
-//                 </div>
-//             ))}
-//             <button onClick={addDriverField}>Add Driver</button>
+    return (
+        <div>
+            <h3>Driver Locations and Capacities</h3>
+            {driverData.map((driver, index) => (
+                <div key={index}>
+                    <input
+                        type="text"
+                        value={driver.location}
+                        onChange={(e) => handleDriverLocationChange(index, e.target.value)}
+                        placeholder={`Enter driver ${index + 1} location`}
+                    />
+                    <input
+                        type="number"
+                        value={driver.capacity}
+                        onChange={(e) => handleDriverCapacityChange(index, parseInt(e.target.value))}
+                        placeholder={`Enter driver ${index + 1} capacity`}
+                        min="1"
+                    />
+                </div>
+            ))}
+            <button onClick={addDriverField}>Add Driver</button>
 
             <h3>Passenger Locations</h3>
             {passengerLocations.map((passenger, index) => (
@@ -125,15 +125,15 @@ function LocationInput({ setCoordinates }) {
             ))}
             <button onClick={addPassengerField}>Add Passenger</button>
 
-//             <h3>Destination</h3>
-//             <input
-//                 type="text"
-//                 value={destination}
-//                 onChange={(e) => setDestination(e.target.value)}
-//                 placeholder="Enter destination"
-//             />
+            <h3>Destination</h3>
+            <input
+                type="text"
+                value={destination}
+                onChange={(e) => setDestination(e.target.value)}
+                placeholder="Enter destination"
+            />
 
-//             <button onClick={handleLocationSubmit}>Submit All Locations</button>
+            <button onClick={handleLocationSubmit}>Submit All Locations</button>
 
             {errorMessage && <p style={{ color: 'red' }}>{errorMessage}</p>}
         </div>
@@ -141,4 +141,4 @@ function LocationInput({ setCoordinates }) {
 }
 }   
 
-// export default LocationInput;
+export default LocationInput;
