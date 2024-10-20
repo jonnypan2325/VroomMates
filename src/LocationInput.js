@@ -5,6 +5,7 @@ function LocationInput({ setCoordinates, map, directionsRenderer, setRouteData }
     const [passengerLocs, setPassengerLocs] = useState(['']);
     const [destination, setDestination] = useState('');
     const [errorMessage, setErrorMessage] = useState('');
+    const [selectedDriver, setSelectedDriver] = useState(0); 
 
     useEffect(() => {
         if (map && directionsRenderer) {
@@ -141,11 +142,21 @@ function LocationInput({ setCoordinates, map, directionsRenderer, setRouteData }
         }
     };
 
+    const handleDriverView = async (index) => {
+        console.log(`Displaying route for driver ${index + 1}`);
+        
+        // Fetch the route for this driver from the database (replace with actual implementation)
+        // const routeData = await fetchRouteFromDatabaseForDriver(index);
+        
+        // Placeholder: console log or display route for this driver
+        console.log(`Retrieving route for driver ${index + 1} from the database...`);
+    };
+
     return (
         <div>
             <h3>Driver Locations and Capacities</h3>
             {driverData.map((driver, index) => (
-                <div key={index}>
+                <div key={index} className="driver-input-group">
                     <input
                         type="text"
                         id={`location-input-${index}`}
@@ -166,14 +177,16 @@ function LocationInput({ setCoordinates, map, directionsRenderer, setRouteData }
 
             <h3>Passenger Locations</h3>
             {passengerLocs.map((passenger, index) => (
-                <input
-                    key={index}
-                    id={`passenger-loc-${index}`}
-                    type="text"
-                    value={passenger}
-                    onChange={(e) => handlePassengerChange(index, e.target.value)}
-                    placeholder={`Enter passenger ${index + 1} location`}
-                />
+                <div key={index} className="passenger-input-group">
+                    <input
+                        key={index}
+                        id={`passenger-loc-${index}`}
+                        type="text"
+                        value={passenger}
+                        onChange={(e) => handlePassengerChange(index, e.target.value)}
+                        placeholder={`Enter passenger ${index + 1} location`}
+                    />
+                </div>
             ))}
             <button onClick={addPassengerField}>Add Passenger</button>
 
@@ -186,8 +199,17 @@ function LocationInput({ setCoordinates, map, directionsRenderer, setRouteData }
                 placeholder="Enter destination"
             />
 
-            <button onClick={handleLocSubmit}>Submit All Locations</button>
+         <button onClick={handleLocSubmit}>Submit All Locations</button>
 
+        <h3>Driver View:</h3>
+            <select id="driver-view-select" value={selectedDriver} onChange={handleDriverView}>
+                {driverData.map((_, index) => (
+                    <option key={index} value={index}>
+                        {index + 1}
+                    </option>
+                ))}
+            </select>
+            
             {errorMessage && <p style={{ color: 'red' }}>{errorMessage}</p>}
         </div>
     );

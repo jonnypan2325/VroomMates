@@ -106,21 +106,23 @@ function App() {
         
   return (
     <div style={{ display: 'flex' }}>
-      <div style={{ width: '30%', padding: '20px' }}>
+      <div style={{ width: '30%', padding: '20px', backgroundColor: '#f5f5dc' }}>
         <h1>VroomMates</h1>
         <p>Enter locations for drivers, passengers, and destination:</p>
         {/* Google Login Button */}
-        <h2>Sign in with Google</h2>
         {profile ? (
           <div>
-            <img src={profile.picture} alt="user" />
-            <h3>User Logged in</h3>
-            <p>Name: {profile.name}</p>
-            <p>Email Address: {profile.email}</p>
-            <button onClick={logOut}>Log out</button>
+            {/* <img src={profile.picture} alt="user" /> */}
+            {/* <h3>User Logged in</h3> */}
+            {/* <p>Name: {profile.name}</p> */}
+            {/* <p>Email Address: {profile.email}</p> */}
+            <p>Hello, {profile.given_name}</p>
+            <button className="google-btn google-logout-btn" onClick={logOut}>
+              <span> Log out </span> 👋
+            </button>
           </div>
         ) : (
-          <button onClick={() => login()}>Sign in with Google 🚀</button>
+          <button className="google-btn" onClick={() => login()}>Sign in with Google 🚀</button>
         )}
   
         {/* Location Input Component */}
