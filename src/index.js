@@ -15,7 +15,7 @@ root.render(
 function initMap() {
   new window.google.maps.Map(document.getElementById("map"), {
     center: { lat: 37.784, lng: -122.403 },
-    zoom: 8,
+    zoom: 12,
   });
 }
 
