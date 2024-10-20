@@ -106,7 +106,7 @@ function App() {
         
   return (
     <div style={{ display: 'flex' }}>
-      <div style={{ width: '30%', padding: '20px', backgroundColor: '#f5f5dc' }}>
+      <div style={{ width: '30%', padding: '20px', backgroundColor: '#fff5f5' }}>
         <h1>VroomMates</h1>
         <p>Enter locations for drivers, passengers, and destination:</p>
         {/* Google Login Button */}

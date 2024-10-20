@@ -52,83 +52,61 @@
   }
 }
 
-.driver-input-group {
+.driver-input-group,
+.passenger-input-group {
   display: flex;
   align-items: center;
-  gap: 5px; /* Space between the inputs */
-  margin-bottom: 1px;
+  gap: 5px;
+  margin-bottom: 10px;
 }
 
-/* Passenger input group */
-.passenger-input-group {
-  margin-bottom: 1px; /* Similar spacing as driver input group */
-}
-
-input {
+input,
+select {
   border: 2px solid #d3d3d3;
   padding: 10px;
-  font-family: 'Comic Sans MS', 'Comic Sans', cursive;
   border-radius: 8px;
   box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
-  margin: 1px 0;
+  margin: 5px 0;
+  font-family: Arial, sans-serif; /* Change to a cleaner font */
 }
 
 input[type="number"] {
   width: 50px; /* Narrower input for capacity */
 }
 
-select {
-  border: 2px solid #d3d3d3;
-  padding: 10px;
-  font-family: 'Comic Sans MS', 'Comic Sans', cursive;
-  border-radius: 8px;
-  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
-  margin: 1px 0;
-}
-
 .google-btn {
-  background-color: #4285f4; /* Google blue color */
+  background-color: #4285f4;
   color: white;
-  font-family: 'Comic Sans MS', 'Comic Sans', cursive;
   border: none;
-  padding: 8px 16px; /* Smaller padding */
-  border-radius: 40px; /* Still keep rounded edges but slightly smaller */
-  font-size: 14px; /* Smaller font size */
+  padding: 8px 16px;
+  border-radius: 40px;
+  font-size: 14px;
   cursor: pointer;
-  box-shadow: 0 3px 5px rgba(0, 0, 0, 0.1); /* Slightly smaller shadow */
-  transition: all 0.3s ease; /* Smooth transition for hover */
+  box-shadow: 0 3px 5px rgba(0, 0, 0, 0.1);
+  transition: all 0.3s ease;
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 8px; /* Reduced space for the icon */
+  gap: 8px;
 }
 
-/* Hover effect */
 .google-btn:hover {
-  background-color: #357ae8; /* Darker blue on hover */
-  box-shadow: 0 5px 7px rgba(0, 0, 0, 0.2); /* Deeper shadow on hover */
-  transform: translateY(-1px); /* Slight lift on hover */
+  background-color: #357ae8;
+  box-shadow: 0 5px 7px rgba(0, 0, 0, 0.2);
+  transform: translateY(-1px);
 }
 
-/* Specific styling for the logout button */
 .google-logout-btn {
-  background-color: #db4437; /* Red for log out (Google's color for delete) */
+  background-color: #db4437;
 }
 
 .google-logout-btn:hover {
-  background-color: #c23321; /* Darker red on hover */
+  background-color: #c23321;
 }
-
-/* Styling the rocket emoji or icon */
-.google-btn img,
-.google-btn span {
-  vertical-align: middle;
-}
-
 
 h1 {
   color: #2a6eb3;
-  font-family: 'Comic Sans MS', 'Comic Sans', cursive;
+  font-family: Arial, sans-serif;
 }
 
 p {
@@ -138,19 +116,42 @@ p {
 
 h2 {
   color: #6a1b9a;
-  font-family: 'Courier New, monospace';
+  font-family: Arial, sans-serif;
 }
 
 h3 {
   color: purple;
-  font-family: 'Verdana, sans-serif';
+  font-family: Arial, sans-serif;
 }
 
 pre {
   color: black;
-  font-family: 'Georgia, serif';
+  font-family: Georgia, serif;
 }
 
 #map {
-  border-left: 1px solid #d3d3d3; /* Define a soft border between the form and map */
+  border-left: 1px solid #d3d3d3;
+}
+.custom-map-control-button {
+  display: block; /* Ensure button takes full width */
+  margin: 10px auto; /* Center the button and give space above */
+  background-color: #fff;
+  border: none;
+  outline: none;
+  width: 200px;
+  height: 40px;
+  cursor: pointer;
+  text-align: center;
+  font-size: 14px;
+  font-weight: bold;
+  color: #333;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.3);
+}
+
+.passenger-input-group button {
+  margin-top: 10px; /* Adds space above the button */
+}
+
+.driver-input-group button {
+  margin-top: 10px; /* Adds space above the button */
 }

@@ -5,6 +5,10 @@ import os
 import math
 import heapq
 import json
+import logging
+logging.basicConfig(level=logging.DEBUG)
+
+routes = []
 
 #The algorithm to get the most optimal paths
 class Driver:
@@ -124,17 +128,74 @@ def give_paths(passengers, drivers, destination):
     return paths
 
 # Load environment variables from .env file
+logging.basicConfig(level=logging.DEBUG)
+
+# In-memory storage for optimized routes
+optimized_routes_store = {}
+
+# Load environment variables from .env file
 load_dotenv()
 
 app = Flask(__name__)
-CORS(app)  # Enable CORS after defining the app
+CORS(app)  # Enable CORS for cross-origin requests
+app.logger.setLevel(logging.INFO)
+logging.basicConfig(level=logging.DEBUG)
 
 @app.route('/routeoptimizer/', methods=['POST'])
 def route_optimizer():
+    data = request.get_json()
+
+    # Validate input data
+
+    driver_location = data.get('drivers')
+    passenger_location = data.get('passengers')
+    destination = data.get('destination')
+
+    if not driver_location or not passenger_location or not destination:
+        return jsonify({'error': 'Missing required data'}), 400
+
+    # Initialize drivers and passengers
+    drivers = []
+    for i, driver in enumerate(driver_location):
+        lat = driver['coordinates']['lat']
+        lng = driver['coordinates']['lng']
+        capacity = driver['capacity']
+        drivers.append(Driver(lng, lat, capacity, i))
+
+    passengers = []
+    for i, passenger in enumerate(passenger_location):
+        lat = passenger['coordinates']['lat']
+        lng = passenger['coordinates']['lng']
+        passengers.append(Passenger(lng, lat, i))
+
+    # Process destination
+    dest = (destination["lng"], destination["lat"])
+
+    # Get optimized paths
+    paths = give_paths(drivers=drivers, passengers=passengers, destination=dest)
+
+    optimizedRoutes = [
+        [{'lat': coord[1], 'lng': coord[0]} for coord in paths[j]] for j in range(len(paths))
+    ]
+
+    # Log and store optimized routes
+    app.logger.info("Optimized Routes: " + json.dumps(optimizedRoutes, indent=4))
+    optimized_routes_store['routes'] = optimizedRoutes
+
+    return jsonify({'status': 'success', 'message': 'Routes computed successfully'}), 200
+
+
+'''@app.route('/routeoptimizer/', methods=['GET','POST'])
+def route_optimizer():
     google_maps_api_key = os.getenv('GOOGLE_MAPS_API_KEY')  # Access the API key
 
+    print("Route optimizer function started", flush=True)
     # Extract data from request
     data = request.get_json()
+    app.logger.info("test")
+    app.logger.info(json.dumps(data, indent=4))  # Logs incoming data
+    app.logger.info("Optimized Routes: " + json.dumps(optimizedRoutes, indent=4))  # Logs optimized routes
+    print(data, flush=True)
     driver_location = data.get('drivers')
     passenger_location = data.get('passengers')
     destination = data.get('destination')
@@ -156,13 +217,30 @@ def route_optimizer():
         passengers.append(Passenger(lng,lat,i))
         i = i + 1
     
-    dest = (destination['location']["lng"],destination['location']["lat"])
+    dest = (destination["lng"],destination["lat"])
     # paths holds a list of driver paths (Ex: [[(dx,dy)...,(Dx,Dy)],[(dx,dy)...,(Dx,Dy)]])
     paths = give_paths(drivers=drivers, passengers=passengers, destination=dest)
-    # Return a sample response
-    return jsonify({
-        j+1 : paths[j] for j in range(len(paths))
-    })
+    app.logger.info("Generated paths: " + json.dumps(paths, indent=4))
+
+    optimizedRoutes = [
+        [{'lat': coord[1], 'lng': coord[0]} for coord in paths[j]] for j in range(len(paths))
+    ]
+    print("Optimized Routes:", json.dumps(optimizedRoutes, indent=4))
+
+    # Return the optimized routes as a JSON response
+    #return jsonify({'optimizedRoutes': optimizedRoutes, 'status': 'success'})
+    routes = optimizedRoutes
+    return jsonify({'optimizedRoutes': optimizedRoutes, 'status': 'success'})
+'''
+# GET to return the last computed optimized routes
+@app.route('/routeoptimizer/', methods=['GET'])
+def get_optimized_routes():
+    # Check if there are stored optimized routes
+    if 'routes' not in optimized_routes_store:
+        return jsonify({'error': 'No routes available. Submit data first using POST.'}), 404
+    
+    # Return the stored optimized routes
+    return jsonify({'optimizedRoutes': optimized_routes_store['routes'], 'status': 'success'}), 200
 
 if __name__ == '__main__':
     app.run(debug=True)
