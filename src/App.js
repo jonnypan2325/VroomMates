@@ -1,11 +1,49 @@
 import './App.css';
 import React, { useState, useEffect } from 'react';
 import LocationInput from './LocationInput';
+import { GoogleOAuthProvider, googleLogout, useGoogleLogin } from '@react-oauth/google';
+import axios from 'axios';
 
 function App() {
-  const [map, setMap] = useState(null); // State for the Google Map instance
+   const [map, setMap] = useState(null); // State for the Google Map instance
   const [directionsRenderer, setDirectionsRenderer] = useState(null); // State for DirectionsRenderer instance
   const [routeData, setRouteData] = useState(null); // State for route data
+
+  // State for handling user and profile data
+  const [user, setUser] = useState(null);
+  const [profile, setProfile] = useState(null);
+
+  // Google login functionality
+  const login = useGoogleLogin({
+    onSuccess: (codeResponse) => {
+      setUser(codeResponse);
+      console.log("User signed in");
+    },
+    onError: (error) => console.log('Login Failed:', error),
+  });
+
+  // Fetch user profile data after login
+  useEffect(() => {
+    if (user) {
+      axios
+        .get(`https://www.googleapis.com/oauth2/v1/userinfo?access_token=${user.access_token}`, {
+          headers: {
+            Authorization: `Bearer ${user.access_token}`,
+            Accept: 'application/json',
+          },
+        })
+        .then((res) => setProfile(res.data))
+        .catch((err) => console.log(err));
+    }
+  }, [user]);
+
+  // Log out functionality
+  const logOut = () => {
+    googleLogout();
+    setProfile(null);
+    console.log("User signed out");
+  };
+  
 
   useEffect(() => {
     const initMap = () => {
@@ -65,16 +103,33 @@ function App() {
       window.onload = initMap;
     }
   }, []); // Ensure this runs only once, when the component mounts
-
+        
   return (
     <div style={{ display: 'flex' }}>
       <div style={{ width: '30%', padding: '20px' }}>
         <h1>VroomMates</h1>
         <p>Enter locations for drivers, passengers, and destination:</p>
-
+        {/* Google Login Button */}
+        <h2>Sign in with Google</h2>
+        {profile ? (
+          <div>
+            <img src={profile.picture} alt="user" />
+            <h3>User Logged in</h3>
+            <p>Name: {profile.name}</p>
+            <p>Email Address: {profile.email}</p>
+            <button onClick={logOut}>Log out</button>
+          </div>
+        ) : (
+          <button onClick={() => login()}>Sign in with Google 🚀</button>
+        )}
+  
         {/* Location Input Component */}
-        <LocationInput map={map} directionsRenderer={directionsRenderer} setRouteData={setRouteData} />
-
+        <LocationInput
+          map={map}
+          directionsRenderer={directionsRenderer}
+          setRouteData={setRouteData}
+        />
+  
         {/* Display route data */}
         {routeData && (
           <div>
@@ -82,11 +137,22 @@ function App() {
             <pre>{JSON.stringify(routeData, null, 2)}</pre>
           </div>
         )}
+  
+        
       </div>
-
+  
       {/* Google Map */}
       <div id="map" style={{ height: '1000px', width: '70%' }}></div>
     </div>
+  );
+}
+
+// Wrapper to provide GoogleOAuthProvider
+function AppWrapper() {
+  return (
+    <GoogleOAuthProvider clientId={process.env.REACT_APP_GOOGLE_CLIENT_ID}>
+      <App />
+    </GoogleOAuthProvider>
   );
 }
 
