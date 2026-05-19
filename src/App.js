@@ -1,7 +1,7 @@
 import './App.css';
 import React, { useState, useEffect } from 'react';
 import LocationInput from './LocationInput';
-import { GoogleOAuthProvider, googleLogout, useGoogleLogin } from '@react-oauth/google';
+import { googleLogout, useGoogleLogin } from '@react-oauth/google';
 import axios from 'axios';
 
 function App() {
@@ -146,15 +146,6 @@ function App() {
       {/* Google Map */}
       <div id="map" style={{ height: '1000px', width: '70%' }}></div>
     </div>
-  );
-}
-
-// Wrapper to provide GoogleOAuthProvider
-function AppWrapper() {
-  return (
-    <GoogleOAuthProvider clientId={process.env.REACT_APP_GOOGLE_CLIENT_ID}>
-      <App />
-    </GoogleOAuthProvider>
   );
 }
 
