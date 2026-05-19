@@ -1,15 +1,24 @@
 # See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
 
 # dependencies
-/node_modules
+node_modules/
 /.pnp
 .pnp.js
+
+# python
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.py[cod]
+*.egg-info/
 
 # testing
 /coverage
 
 # production
-/build
+build/
+dist/
 
 # misc
 .DS_Store
@@ -23,10 +32,3 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 .vercel
-
-# python
-.venv/
-venv/
-__pycache__/
-*.py[cod]
-*.egg-info/
