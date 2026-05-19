@@ -7,23 +7,12 @@ import { GoogleOAuthProvider } from "@react-oauth/google"
 
 const root = ReactDOM.createRoot(document.getElementById('root'));
 root.render(
-  <GoogleOAuthProvider clientId='172458795590-bhimpf11p5srub5vhbknkpd5l9eb17sb.apps.googleusercontent.com'>
+  <GoogleOAuthProvider clientId={process.env.REACT_APP_GOOGLE_CLIENT_ID}>
     <React.StrictMode>
       <App />
     </React.StrictMode>,
   </GoogleOAuthProvider>
 );
-
-
-function initMap() {
-  new window.google.maps.Map(document.getElementById("map"), {
-    center: { lat: 37.784, lng: -122.403 },
-    zoom: 12,
-  });
-}
-
-// Wait for the DOM to be fully loaded before initializing the map
-window.onload = initMap;
 
 // If you want to start measuring performance in your app, pass a function
 // to log results (for example: reportWebVitals(console.log))
