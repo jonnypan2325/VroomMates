@@ -175,7 +175,7 @@ def route_optimizer():
     app.logger.info("Optimized Routes: " + json.dumps(optimizedRoutes, indent=4))
     optimized_routes_store['routes'] = optimizedRoutes
 
-    return jsonify({'status': 'success', 'message': 'Routes computed successfully'}), 200
+    return jsonify({'status': 'success', 'optimizedRoutes': optimizedRoutes}), 200
 
 
 # GET to return the last computed optimized routes

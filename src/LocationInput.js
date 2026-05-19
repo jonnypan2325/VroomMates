@@ -149,16 +149,25 @@ function LocationInput({ map, directionsRenderer, setRouteData }) {
     const addPassengerField = () => setPassengerLocs([...passengerLocs, { address: '', coordinates: { lat: null, lng: null } }]);
 
     const handleLocSubmit = async () => {
+        setErrorMessage('');
         try {
             const driverCoords = driverData.map(driver => driver.coordinates);
             const passengerCoords = passengerLocs.map(passenger => passenger.coordinates);
             const destCoords = destination.coordinates;
 
-            if (driverCoords && passengerCoords && destCoords) {
-                await sendCoordsToRouteOptimizer(driverCoords, passengerCoords, destCoords);
+            const hasInvalidDriver = driverCoords.some(c => c.lat == null || c.lng == null);
+            const hasInvalidPassenger = passengerCoords.some(c => c.lat == null || c.lng == null);
+            const hasInvalidDestination = destCoords.lat == null || destCoords.lng == null;
+
+            if (hasInvalidDriver || hasInvalidPassenger || hasInvalidDestination) {
+                setErrorMessage('Please enter a valid address for every driver, passenger, and the destination before submitting.');
+                return;
             }
+
+            await sendCoordsToRouteOptimizer(driverCoords, passengerCoords, destCoords);
         } catch (error) {
             console.error('Error processing locations', error);
+            setErrorMessage('Something went wrong while preparing your locations. Please try again.');
         }
     };
 
@@ -184,41 +193,22 @@ function LocationInput({ map, directionsRenderer, setRouteData }) {
             if (!response.ok) {
                 throw new Error('Failed to compute routes: ' + response.statusText);
             }
-    
-            // const result = await response.json();
-            // console.log(result.message);
-            
-            // console.log("Getting routes");
-            // //const result = await response.json();
 
-            // console.log("Optimized Routes from Flask:", JSON.stringify(result.optimizedRoutes, null, 2));
+            const result = await response.json();
+            console.log("Optimized Routes from Flask:", JSON.stringify(result.optimizedRoutes, null, 2));
 
-            // //Log the entire result in a readable format
-            // console.log("Result:", JSON.stringify(result, null, 2)); // Pretty-print with 2 spaces indentation
+            if (!result.optimizedRoutes || result.optimizedRoutes.length === 0) {
+                setErrorMessage('No optimized routes were returned. Please check your inputs and try again.');
+                return;
+            }
 
-            // //Use the result after awaiting response.json()
-            // setOptimizedRoutes(result.optimizedRoutes);
-
-            const result = {
-                optimizedRoutes: [
-                    [
-                        { lat: 34.052235, lng: -118.243683 }, // Driver 1 location (e.g., Los Angeles)
-                        { lat: 34.062235, lng: -118.243683 }, // Passenger 1 location for Driver 1
-                        { lat: 34.072235, lng: -118.243683 }, // Passenger 2 location for Driver 1
-                        { lat: 34.082235, lng: -118.243683 }, // Final destination for Driver 1
-                    ],
-                    [
-                        { lat: 33.941589, lng: -118.40853 }, // Driver 2 location (e.g., LAX)
-                        { lat: 33.951589, lng: -118.40853 }, // Passenger 1 location for Driver 2
-                        { lat: 33.961589, lng: -118.40853 }, // Passenger 2 location for Driver 2
-                        { lat: 33.971589, lng: -118.40853 }, // Final destination for Driver 2
-                    ]
-                ]
-            };
             setOptimizedRoutes(result.optimizedRoutes);
 
         } catch (error) {
             console.error('Error sending coordinates to route optimizer:', error);
+            setErrorMessage(
+                'Could not reach the route optimizer service. Please make sure the backend is running and try again.'
+            );
         }
     };
 
