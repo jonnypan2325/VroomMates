@@ -6,6 +6,25 @@ import heapq
 import json
 import logging
 
+
+def haversine_distance(coord1, coord2, R=3959):
+    '''
+    Great-circle distance in miles between two (lng, lat) coordinates.
+
+    Note: this module stores all coordinates as (longitude, latitude)
+    tuples (Driver/Passenger.get_coords() and the destination tuple).
+    R defaults to the Earth radius in miles.
+    '''
+    lng1, lat1 = coord1
+    lng2, lat2 = coord2
+    lat1_r = math.radians(lat1)
+    lat2_r = math.radians(lat2)
+    dlat = lat2_r - lat1_r
+    dlon = math.radians(lng2 - lng1)
+    a = math.sin(dlat / 2) ** 2 + math.cos(lat1_r) * math.cos(lat2_r) * math.sin(dlon / 2) ** 2
+    return 2 * R * math.asin(math.sqrt(a))
+
+
 #The algorithm to get the most optimal paths
 class Driver:
     def __init__(self,x,y,capacity, driver_num):
@@ -32,20 +51,8 @@ class Driver:
         return self.passengers
 
     def get_path(self, destination):
-        def haversine_distance(coord1, coord2, R=3959):
-            '''
-            Calculates the distance between two points on the earth
-            '''
-            lat1, lon1 = coord1
-            lat2, lon2 = coord2
-            lat1 = math.radians(lat1)
-            lon1 = math.radians(lon1)
-            lat2 = math.radians(lat2)
-            lon2 = math.radians(lon2)
-            dlat = lat2 - lat1
-            dlon = lon2 - lon1
-            dist = 2 * R * math.sqrt((math.sin(dlat / 2) ** 2) + math.cos(lat1) * math.cos(lat2) * (math.sin(dlon / 2)**2))
-            return dist
+        if not self.passengers:
+            return [self.get_coords(), destination]
         open_list = [(0, (self.get_coords(), tuple(self.passengers), []))]
 
         visited = set()
@@ -84,43 +91,85 @@ class Passenger:
     def get_passenger_num(self):
         return self.passenger_num
 
-def distance_from_line(passenger, driver,destination):
+def distance_from_line(passenger, driver, destination):
     '''
-    Returns the distance of the passenger from the path of the driver to the destination
+    Detour cost (in miles) for `driver` to pick up `passenger` and continue
+    to `destination`, compared to driving straight to the destination:
+
+        detour = d(driver -> passenger) + d(passenger -> destination)
+                 - d(driver -> destination)
+
+    By the triangle inequality this is always >= 0. Lower means the
+    passenger is a better fit for this driver's route, so it's a useful
+    pairwise score for assignment optimization.
     '''
-    P_x, P_y = passenger.get_coords()
-    A_x, A_y = driver.get_coords()
-    B_x, B_y = destination
-    offset = abs((B_x - A_x)*P_y + (A_y - B_y)*P_x - B_x*A_y + B_y*A_x)
-    distance = math.sqrt((B_y-A_y)*(B_y-A_y) + (B_x-A_x)*(B_x-A_x))
-    return offset/distance
+    driver_to_passenger = haversine_distance(driver.get_coords(), passenger.get_coords())
+    passenger_to_dest = haversine_distance(passenger.get_coords(), destination)
+    driver_to_dest = haversine_distance(driver.get_coords(), destination)
+    return (driver_to_passenger + passenger_to_dest) - driver_to_dest
+
 
 def assign_drivers(drivers, passengers, destination):
     '''
-    Assigns each passenger ot each driver based on the proximity to the path
+    Assigns each passenger to a driver using a global-greedy bipartite
+    assignment over pairwise detour cost (see `distance_from_line`).
+
+    Compared to the previous per-passenger greedy, this lets a passenger
+    with one outstanding cheap match "win" that driver even if some other
+    passenger is processed first in iteration order. Capacity is enforced
+    via `driver.get_capacity()` / `driver.add_passenger()`.
     '''
-    passengers_distances = []
+    if not drivers or not passengers:
+        return drivers
+
+    candidates = []
     for passenger in passengers:
-        path_distances = {}
         for driver in drivers:
-            path_distances[distance_from_line(passenger,driver,destination)] = driver.get_driver_num()
-        sorted_keys = sorted(path_distances)
-        sorted_dict = {key:path_distances[key] for key in sorted_keys}
-        passengers_distances.append(sorted_dict)
-    for passenger in passengers:
-        distances = passengers_distances[passenger.get_passenger_num()]
-        for distance in distances.keys():
-            driver = drivers[distances[distance]]
-            if (driver.get_capacity() > 0):
-                driver.add_passenger(passenger)
+            cost = distance_from_line(passenger, driver, destination)
+            candidates.append((
+                cost,
+                passenger.get_passenger_num(),
+                driver.get_driver_num(),
+            ))
+    # Sort by cost ascending; ties broken deterministically by ids.
+    candidates.sort()
+
+    driver_by_num = {d.get_driver_num(): d for d in drivers}
+    passenger_by_num = {p.get_passenger_num(): p for p in passengers}
+    assigned = set()
+
+    for _cost, pnum, dnum in candidates:
+        if pnum in assigned:
+            continue
+        driver = driver_by_num[dnum]
+        if driver.get_capacity() > 0:
+            driver.add_passenger(passenger_by_num[pnum])
+            assigned.add(pnum)
+            if len(assigned) == len(passengers):
                 break
     return drivers
 
-def give_paths(passengers, drivers, destination):
+
+def give_paths(drivers, passengers, destination):
+    '''
+    Returns one path per driver (in input order). A path is a list of
+    (lng, lat) tuples starting at the driver and ending at `destination`.
+    Drivers with no assigned passengers get a direct two-point path.
+    '''
     drivers = assign_drivers(drivers, passengers, destination)
     paths = []
     for d in drivers:
-        paths.append(d.get_path(destination))
+        if not d.get_passengers():
+            paths.append([d.get_coords(), destination])
+            continue
+        path = d.get_path(destination)
+        if not path:
+            # Defensive fallback: A* search returned nothing (should not
+            # happen since destination is always reachable). Emit at
+            # least the driver origin and destination so the frontend
+            # gets a renderable route.
+            path = [d.get_coords(), destination]
+        paths.append(path)
     return paths
 
 # In-memory storage for optimized routes
@@ -136,33 +185,72 @@ logging.basicConfig(level=logging.DEBUG)
 
 @app.route('/routeoptimizer/', methods=['POST'])
 def route_optimizer():
-    data = request.get_json()
-
-    # Validate input data
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({'error': 'Request body must be a JSON object'}), 400
 
     driver_location = data.get('drivers')
     passenger_location = data.get('passengers')
     destination = data.get('destination')
 
-    if not driver_location or not passenger_location or not destination:
-        return jsonify({'error': 'Missing required data'}), 400
+    # Top-level shape checks.
+    if not isinstance(driver_location, list) or len(driver_location) == 0:
+        return jsonify({'error': 'drivers must be a non-empty list'}), 400
+    if not isinstance(passenger_location, list) or len(passenger_location) == 0:
+        return jsonify({'error': 'passengers must be a non-empty list'}), 400
+    if not isinstance(destination, dict) or 'lat' not in destination or 'lng' not in destination:
+        return jsonify({'error': 'destination must include lat and lng'}), 400
+    try:
+        dest_lat = float(destination['lat'])
+        dest_lng = float(destination['lng'])
+    except (TypeError, ValueError):
+        return jsonify({'error': 'destination lat/lng must be numbers'}), 400
 
-    # Initialize drivers and passengers
+    # Initialize drivers, validating each entry.
     drivers = []
+    total_capacity = 0
     for i, driver in enumerate(driver_location):
-        lat = driver['coordinates']['lat']
-        lng = driver['coordinates']['lng']
-        capacity = driver['capacity']
+        if not isinstance(driver, dict):
+            return jsonify({'error': f'driver[{i}] must be an object'}), 400
+        coords = driver.get('coordinates')
+        if not isinstance(coords, dict) or 'lat' not in coords or 'lng' not in coords:
+            return jsonify({'error': f'driver[{i}].coordinates must include lat and lng'}), 400
+        try:
+            lat = float(coords['lat'])
+            lng = float(coords['lng'])
+        except (TypeError, ValueError):
+            return jsonify({'error': f'driver[{i}] coordinates must be numbers'}), 400
+        capacity = driver.get('capacity')
+        if not isinstance(capacity, int) or isinstance(capacity, bool) or capacity <= 0:
+            return jsonify({'error': f'driver[{i}].capacity must be a positive integer'}), 400
+        total_capacity += capacity
         drivers.append(Driver(lng, lat, capacity, i))
 
+    # Initialize passengers, validating each entry.
     passengers = []
     for i, passenger in enumerate(passenger_location):
-        lat = passenger['coordinates']['lat']
-        lng = passenger['coordinates']['lng']
+        if not isinstance(passenger, dict):
+            return jsonify({'error': f'passenger[{i}] must be an object'}), 400
+        coords = passenger.get('coordinates')
+        if not isinstance(coords, dict) or 'lat' not in coords or 'lng' not in coords:
+            return jsonify({'error': f'passenger[{i}].coordinates must include lat and lng'}), 400
+        try:
+            lat = float(coords['lat'])
+            lng = float(coords['lng'])
+        except (TypeError, ValueError):
+            return jsonify({'error': f'passenger[{i}] coordinates must be numbers'}), 400
         passengers.append(Passenger(lng, lat, i))
 
-    # Process destination
-    dest = (destination["lng"], destination["lat"])
+    if total_capacity < len(passengers):
+        return jsonify({
+            'error': (
+                f'insufficient total driver capacity ({total_capacity}) '
+                f'for {len(passengers)} passengers'
+            )
+        }), 400
+
+    # Process destination (stored as (lng, lat) to match Driver/Passenger).
+    dest = (dest_lng, dest_lat)
 
     # Get optimized paths
     paths = give_paths(drivers=drivers, passengers=passengers, destination=dest)
