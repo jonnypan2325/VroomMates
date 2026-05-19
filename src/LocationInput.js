@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 
 function LocationInput({ map, directionsRenderer, setRouteData }) {
     const [driverData, setDriverData] = useState([
@@ -9,10 +9,9 @@ function LocationInput({ map, directionsRenderer, setRouteData }) {
     ]);
     const [destination, setDestination] = useState({ address: '', coordinates: { lat: null, lng: null } });
     const [optimizedRoutes, setOptimizedRoutes] = useState([]);
-    const [errorMessage, setErrorMessage] = useState('');
     const [selectedDriver, setSelectedDriver] = useState(0); 
 
-    const displayRoutesForDriver = (route) => {
+    const displayRoutesForDriver = useCallback((route) => {
         console.log("Displaying Route");
         const [driver, ...passengers] = route;
 
@@ -39,7 +38,7 @@ function LocationInput({ map, directionsRenderer, setRouteData }) {
                 }
             }
         );
-    };
+    }, [directionsRenderer]);
 
     useEffect(() => {
         console.log("test");
@@ -48,7 +47,25 @@ function LocationInput({ map, directionsRenderer, setRouteData }) {
             console.log("Running");
             displayRoutesForDriver(optimizedRoutes[selectedDriver]);
         }
-    }, [optimizedRoutes, directionsRenderer, selectedDriver]);
+    }, [optimizedRoutes, selectedDriver, displayRoutesForDriver]);
+
+    // Handle driver changes (both address and coordinates)
+    const handleDriverChange = useCallback((index, locationData) => {
+        setDriverData((prev) => {
+            const updated = [...prev];
+            updated[index] = { ...updated[index], ...locationData };
+            return updated;
+        });
+    }, []);
+
+    // Handle passenger changes (both address and coordinates)
+    const handlePassengerChange = useCallback((index, locationData) => {
+        setPassengerLocs((prev) => {
+            const updated = [...prev];
+            updated[index] = { ...updated[index], ...locationData };
+            return updated;
+        });
+    }, []);
 
     useEffect(() => {
         if (map && directionsRenderer) {
@@ -122,14 +139,7 @@ function LocationInput({ map, directionsRenderer, setRouteData }) {
                 });
             }
         }
-    }, [map, directionsRenderer, driverData, passengerLocs]);
-
-    // Handle driver changes (both address and coordinates)
-    const handleDriverChange = (index, locationData) => {
-        const updatedDrivers = [...driverData];
-        updatedDrivers[index] = { ...updatedDrivers[index], ...locationData };
-        setDriverData(updatedDrivers);
-    };
+    }, [map, directionsRenderer, driverData, passengerLocs, handleDriverChange, handlePassengerChange]);
 
     const handleDriverCapacityChange = (index, value) => {
         const updatedDrivers = [...driverData];
@@ -138,13 +148,6 @@ function LocationInput({ map, directionsRenderer, setRouteData }) {
     };
 
     const addDriverField = () => setDriverData([...driverData, { address: '', capacity: 0, coordinates: { lat: null, lng: null } }]);
-
-    // Handle passenger changes (both address and coordinates)
-    const handlePassengerChange = (index, locationData) => {
-        const updatedPassengers = [...passengerLocs];
-        updatedPassengers[index] = { ...updatedPassengers[index], ...locationData };
-        setPassengerLocs(updatedPassengers);
-    };
 
     const addPassengerField = () => setPassengerLocs([...passengerLocs, { address: '', coordinates: { lat: null, lng: null } }]);
 
@@ -222,23 +225,6 @@ function LocationInput({ map, directionsRenderer, setRouteData }) {
         }
     };
 
-    async function getOptimizedRoutes() {
-        try {
-            const response = await fetch('http://127.0.0.1:5000/routeoptimizer/', {
-                method: 'GET'
-            });
-    
-            if (!response.ok) {
-                throw new Error('Failed to fetch routes: ' + response.statusText);
-            }
-    
-            const result = await response.json();
-            console.log('Retrieved Optimized Routes:', result.optimizedRoutes);
-        } catch (error) {
-            console.error('Error fetching routes:', error);
-        }
-    }
-
     const handleDriverView = async (index) => {
         console.log(`Displaying route for driver ${index + 1}`);
         const selectedDriverIndex = parseInt(index.target.value);
@@ -301,8 +287,6 @@ function LocationInput({ map, directionsRenderer, setRouteData }) {
                     </option>
                 ))}
             </select>
-            
-            {errorMessage && <p style={{ color: 'red' }}>{errorMessage}</p>}
         </div>
     );    
 }
