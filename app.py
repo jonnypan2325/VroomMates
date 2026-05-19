@@ -150,15 +150,15 @@ def route_optimizer():
     # Initialize drivers and passengers
     drivers = []
     for i, driver in enumerate(driver_location):
-        lat = driver['coordinates']['lat']
-        lng = driver['coordinates']['lng']
+        lat = driver['location']['lat']
+        lng = driver['location']['lng']
         capacity = driver['capacity']
         drivers.append(Driver(lng, lat, capacity, i))
 
     passengers = []
     for i, passenger in enumerate(passenger_location):
-        lat = passenger['coordinates']['lat']
-        lng = passenger['coordinates']['lng']
+        lat = passenger['lat']
+        lng = passenger['lng']
         passengers.append(Passenger(lng, lat, i))
 
     # Process destination
