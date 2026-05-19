@@ -1,14 +1,10 @@
 from flask import Flask, request, jsonify
 from dotenv import load_dotenv
 from flask_cors import CORS
-import os
 import math
 import heapq
 import json
 import logging
-logging.basicConfig(level=logging.DEBUG)
-
-routes = []
 
 #The algorithm to get the most optimal paths
 class Driver:
@@ -127,9 +123,6 @@ def give_paths(passengers, drivers, destination):
         paths.append(d.get_path(destination))
     return paths
 
-# Load environment variables from .env file
-logging.basicConfig(level=logging.DEBUG)
-
 # In-memory storage for optimized routes
 optimized_routes_store = {}
 
@@ -185,53 +178,6 @@ def route_optimizer():
     return jsonify({'status': 'success', 'message': 'Routes computed successfully'}), 200
 
 
-'''@app.route('/routeoptimizer/', methods=['GET','POST'])
-def route_optimizer():
-    google_maps_api_key = os.getenv('GOOGLE_MAPS_API_KEY')  # Access the API key
-
-    print("Route optimizer function started", flush=True)
-    # Extract data from request
-    data = request.get_json()
-    app.logger.info("test")
-    app.logger.info(json.dumps(data, indent=4))  # Logs incoming data
-    app.logger.info("Optimized Routes: " + json.dumps(optimizedRoutes, indent=4))  # Logs optimized routes
-    print(data, flush=True)
-    driver_location = data.get('drivers')
-    passenger_location = data.get('passengers')
-    destination = data.get('destination')
-
-    drivers = []
-    i = 0
-    for driver in driver_location:
-        lat = driver['coordinates']['lat']
-        lng = driver['coordinates']['lng']
-        capacity = driver['capacity']
-        drivers.append(Driver(lng, lat, capacity, i))
-        i = i+1
-    
-    passengers = []
-    i = 0
-    for passenger in passenger_location:
-        lat = passenger['coordinates']['lat']
-        lng = passenger['coordinates']['lng']
-        passengers.append(Passenger(lng,lat,i))
-        i = i + 1
-    
-    dest = (destination["lng"],destination["lat"])
-    # paths holds a list of driver paths (Ex: [[(dx,dy)...,(Dx,Dy)],[(dx,dy)...,(Dx,Dy)]])
-    paths = give_paths(drivers=drivers, passengers=passengers, destination=dest)
-    app.logger.info("Generated paths: " + json.dumps(paths, indent=4))
-
-    optimizedRoutes = [
-        [{'lat': coord[1], 'lng': coord[0]} for coord in paths[j]] for j in range(len(paths))
-    ]
-    print("Optimized Routes:", json.dumps(optimizedRoutes, indent=4))
-
-    # Return the optimized routes as a JSON response
-    #return jsonify({'optimizedRoutes': optimizedRoutes, 'status': 'success'})
-    routes = optimizedRoutes
-    return jsonify({'optimizedRoutes': optimizedRoutes, 'status': 'success'})
-'''
 # GET to return the last computed optimized routes
 @app.route('/routeoptimizer/', methods=['GET'])
 def get_optimized_routes():
