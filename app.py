@@ -212,14 +212,14 @@ def route_optimizer():
     for i, driver in enumerate(driver_location):
         if not isinstance(driver, dict):
             return jsonify({'error': f'driver[{i}] must be an object'}), 400
-        coords = driver.get('coordinates')
-        if not isinstance(coords, dict) or 'lat' not in coords or 'lng' not in coords:
-            return jsonify({'error': f'driver[{i}].coordinates must include lat and lng'}), 400
+        location = driver.get('location')
+        if not isinstance(location, dict) or 'lat' not in location or 'lng' not in location:
+            return jsonify({'error': f'driver[{i}].location must include lat and lng'}), 400
         try:
-            lat = float(coords['lat'])
-            lng = float(coords['lng'])
+            lat = float(location['lat'])
+            lng = float(location['lng'])
         except (TypeError, ValueError):
-            return jsonify({'error': f'driver[{i}] coordinates must be numbers'}), 400
+            return jsonify({'error': f'driver[{i}] location must be numbers'}), 400
         capacity = driver.get('capacity')
         if not isinstance(capacity, int) or isinstance(capacity, bool) or capacity <= 0:
             return jsonify({'error': f'driver[{i}].capacity must be a positive integer'}), 400
@@ -231,14 +231,13 @@ def route_optimizer():
     for i, passenger in enumerate(passenger_location):
         if not isinstance(passenger, dict):
             return jsonify({'error': f'passenger[{i}] must be an object'}), 400
-        coords = passenger.get('coordinates')
-        if not isinstance(coords, dict) or 'lat' not in coords or 'lng' not in coords:
-            return jsonify({'error': f'passenger[{i}].coordinates must include lat and lng'}), 400
+        if 'lat' not in passenger or 'lng' not in passenger:
+            return jsonify({'error': f'passenger[{i}] must include lat and lng'}), 400
         try:
-            lat = float(coords['lat'])
-            lng = float(coords['lng'])
+            lat = float(passenger['lat'])
+            lng = float(passenger['lng'])
         except (TypeError, ValueError):
-            return jsonify({'error': f'passenger[{i}] coordinates must be numbers'}), 400
+            return jsonify({'error': f'passenger[{i}] lat/lng must be numbers'}), 400
         passengers.append(Passenger(lng, lat, i))
 
     if total_capacity < len(passengers):
@@ -263,7 +262,7 @@ def route_optimizer():
     app.logger.info("Optimized Routes: " + json.dumps(optimizedRoutes, indent=4))
     optimized_routes_store['routes'] = optimizedRoutes
 
-    return jsonify({'status': 'success', 'message': 'Routes computed successfully'}), 200
+    return jsonify({'status': 'success', 'optimizedRoutes': optimizedRoutes}), 200
 
 
 # GET to return the last computed optimized routes
