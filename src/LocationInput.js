@@ -195,7 +195,10 @@ function LocationInput({ map, directionsRenderer, setRouteData }) {
             });
 
             if (!response.ok) {
-                throw new Error('Failed to compute routes: ' + response.statusText);
+                const errorBody = await response.json().catch(() => null);
+                const backendMessage = errorBody?.error || response.statusText || 'Unknown error';
+                setErrorMessage(`The route optimizer rejected the request: ${backendMessage}`);
+                return;
             }
 
             const result = await response.json();
