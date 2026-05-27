@@ -156,6 +156,70 @@ pre {
   margin-top: 10px; /* Adds space above the button */
 }
 
+.destination-input-group {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin-bottom: 10px;
+}
+
+.icon-cell {
+  font-size: 22px;
+  min-width: 28px;
+  text-align: center;
+  user-select: none;
+}
+
+.row-remove-btn {
+  background: transparent;
+  border: none;
+  color: #db4437;
+  font-size: 16px;
+  cursor: pointer;
+  padding: 4px 8px;
+  box-shadow: none;
+  border-radius: 4px;
+}
+
+.row-remove-btn:hover {
+  color: #c23321;
+  background: rgba(219, 68, 55, 0.08);
+}
+
+.action-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.clear-btn {
+  background-color: #db4437;
+}
+
+.clear-btn:hover {
+  background-color: #c23321;
+}
+
+.send-to-phone {
+  margin-top: 16px;
+  text-align: center;
+}
+
+.send-to-phone img {
+  border: 1px solid #d3d3d3;
+  padding: 4px;
+  background: #fff;
+  display: inline-block;
+  margin-bottom: 8px;
+}
+
+.copy-status {
+  color: #2a6eb3;
+  font-style: italic;
+  margin-left: 6px;
+}
+
 .app-shell {
   display: flex;
   flex-direction: row;

@@ -53,7 +53,7 @@ function App() {
         zoom: 14,
       });
 
-      const directionsRendererInstance = new window.google.maps.DirectionsRenderer();
+      const directionsRendererInstance = new window.google.maps.DirectionsRenderer({ suppressMarkers: true });
       directionsRendererInstance.setMap(mapInstance); // Attach the directions renderer to the map
 
       // Store the map and directionsRenderer instances in state
