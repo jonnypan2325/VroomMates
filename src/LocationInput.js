@@ -10,7 +10,8 @@ function LocationInput({ map, directionsRenderer, setRouteData }) {
     const [destination, setDestination] = useState({ address: '', coordinates: { lat: null, lng: null } });
     const [optimizedRoutes, setOptimizedRoutes] = useState([]);
     const [errorMessage, setErrorMessage] = useState('');
-    const [selectedDriver, setSelectedDriver] = useState(0); 
+    const [selectedDriver, setSelectedDriver] = useState(0);
+    const [editOpen, setEditOpen] = useState(true);
 
     const displayRoutesForDriver = useCallback((route) => {
         console.log("Displaying Route");
@@ -210,6 +211,8 @@ function LocationInput({ map, directionsRenderer, setRouteData }) {
             }
 
             setOptimizedRoutes(result.optimizedRoutes);
+            setSelectedDriver(0);
+            setEditOpen(false);
 
         } catch (error) {
             console.error('Error sending coordinates to route optimizer:', error);
@@ -219,72 +222,84 @@ function LocationInput({ map, directionsRenderer, setRouteData }) {
         }
     };
 
-    const handleDriverView = async (index) => {
-        console.log(`Displaying route for driver ${index + 1}`);
-        const selectedDriverIndex = parseInt(index.target.value);
-        setSelectedDriver(selectedDriverIndex); 
+    const handleDriverView = (e) => {
+        setSelectedDriver(parseInt(e.target.value, 10));
     };
 
     return (
         <div>
-            <h3>Driver Locations and Capacities</h3>
-            {driverData.map((driver, index) => (
-                <div key={index} className="driver-input-group">
-                    <input
-                        type="number"
-                        value={driver.capacity}
-                        onChange={(e) => handleDriverCapacityChange(index, parseInt(e.target.value))}
-                        placeholder={`Driver ${index + 1} capacity`}
-                        min="1"
-                    />
-                    <input
-                        type="text"
-                        id={`location-input-${index}`}
-                        value={driver.address}
-                        onChange={(e) => handleDriverChange(index, { address: e.target.value, coordinates: driver.coordinates })}
-                        placeholder={`Driver ${index + 1} location`}
-                    />
-                </div>
-            ))}
-            <button onClick={addDriverField}>Add Driver</button>
-    
-            <h3>Passenger Locations</h3>
-            {passengerLocs.map((passenger, index) => (
-                <div key={index} className="passenger-input-group">
-                    <input
-                        id={`passenger-loc-${index}`}
-                        type="text"
-                        value={passenger.address}
-                        onChange={(e) => handlePassengerChange(index, { address: e.target.value, coordinates: passenger.coordinates })}
-                        placeholder={`Passenger ${index + 1} location`}
-                    />
-                </div>
-            ))}
-            <button onClick={addPassengerField}>Add Passenger</button>
-    
-            <h3>Destination</h3>
-            <input
-                type="text"
-                id="destination"
-                value={destination.address}
-                onChange={(e) => setDestination({ address: e.target.value, coordinates: destination.coordinates })}
-                placeholder="Destination"
-            />
-    
-            <button onClick={handleLocSubmit}>Submit All Locations</button>
-    
-            <h3>Driver View:</h3>
-            <select id="driver-view-select" value={selectedDriver} onChange={handleDriverView}>
-                {driverData.map((_, index) => (
-                    <option key={index} value={index}>
-                        {index + 1}
-                    </option>
+            <details
+                className="edit-section"
+                open={editOpen}
+                onToggle={(e) => setEditOpen(e.currentTarget.open)}
+            >
+                <summary className="edit-summary">
+                    {editOpen ? 'Hide locations' : 'Edit locations'}
+                </summary>
+
+                <h3>Driver Locations and Capacities</h3>
+                {driverData.map((driver, index) => (
+                    <div key={index} className="driver-input-group">
+                        <input
+                            type="number"
+                            value={driver.capacity}
+                            onChange={(e) => handleDriverCapacityChange(index, parseInt(e.target.value))}
+                            placeholder={`Driver ${index + 1} capacity`}
+                            min="1"
+                        />
+                        <input
+                            type="text"
+                            id={`location-input-${index}`}
+                            value={driver.address}
+                            onChange={(e) => handleDriverChange(index, { address: e.target.value, coordinates: driver.coordinates })}
+                            placeholder={`Driver ${index + 1} location`}
+                        />
+                    </div>
                 ))}
-            </select>
+                <button onClick={addDriverField}>Add Driver</button>
+
+                <h3>Passenger Locations</h3>
+                {passengerLocs.map((passenger, index) => (
+                    <div key={index} className="passenger-input-group">
+                        <input
+                            id={`passenger-loc-${index}`}
+                            type="text"
+                            value={passenger.address}
+                            onChange={(e) => handlePassengerChange(index, { address: e.target.value, coordinates: passenger.coordinates })}
+                            placeholder={`Passenger ${index + 1} location`}
+                        />
+                    </div>
+                ))}
+                <button onClick={addPassengerField}>Add Passenger</button>
+
+                <h3>Destination</h3>
+                <input
+                    type="text"
+                    id="destination"
+                    value={destination.address}
+                    onChange={(e) => setDestination({ address: e.target.value, coordinates: destination.coordinates })}
+                    placeholder="Destination"
+                />
+
+                <button onClick={handleLocSubmit}>Submit All Locations</button>
+            </details>
+
+            {optimizedRoutes.length > 0 && (
+                <>
+                    <h3>Driver View:</h3>
+                    <select id="driver-view-select" value={selectedDriver} onChange={handleDriverView}>
+                        {optimizedRoutes.map((_, index) => (
+                            <option key={index} value={index}>
+                                {index + 1}
+                            </option>
+                        ))}
+                    </select>
+                </>
+            )}
 
             {errorMessage && <p style={{ color: 'red' }}>{errorMessage}</p>}
         </div>
-    );    
+    );
 }
 
 export default LocationInput;

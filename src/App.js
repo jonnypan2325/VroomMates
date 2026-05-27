@@ -12,6 +12,7 @@ function App() {
   // State for handling user and profile data
   const [user, setUser] = useState(null);
   const [profile, setProfile] = useState(null);
+  const [activeTab, setActiveTab] = useState('inputs');
 
   // Google login functionality
   const login = useGoogleLogin({
@@ -105,17 +106,29 @@ function App() {
   }, []); // Ensure this runs only once, when the component mounts
         
   return (
-    <div style={{ display: 'flex' }}>
-      <div style={{ width: '30%', padding: '20px', backgroundColor: '#fff5f5' }}>
+    <div className="app-shell" data-active-tab={activeTab}>
+      <nav className="mobile-tabs" role="tablist">
+        <button
+          role="tab"
+          aria-selected={activeTab === 'inputs'}
+          onClick={() => setActiveTab('inputs')}
+        >
+          Inputs
+        </button>
+        <button
+          role="tab"
+          aria-selected={activeTab === 'map'}
+          onClick={() => setActiveTab('map')}
+        >
+          Map
+        </button>
+      </nav>
+
+      <aside className="sidebar">
         <h1>VroomMates</h1>
         <p>Enter locations for drivers, passengers, and destination:</p>
-        {/* Google Login Button */}
         {profile ? (
           <div>
-            {/* <img src={profile.picture} alt="user" /> */}
-            {/* <h3>User Logged in</h3> */}
-            {/* <p>Name: {profile.name}</p> */}
-            {/* <p>Email Address: {profile.email}</p> */}
             <p>Hello, {profile.given_name}</p>
             <button className="google-btn google-logout-btn" onClick={logOut}>
               <span> Log out </span> 👋
@@ -124,27 +137,24 @@ function App() {
         ) : (
           <button className="google-btn" onClick={() => login()}>Sign in with Google 🚀</button>
         )}
-  
-        {/* Location Input Component */}
+
         <LocationInput
           map={map}
           directionsRenderer={directionsRenderer}
           setRouteData={setRouteData}
         />
-  
-        {/* Display route data */}
+
         {routeData && (
           <div>
             <h3>Optimized Route Data</h3>
             <pre>{JSON.stringify(routeData, null, 2)}</pre>
           </div>
         )}
-  
-        
-      </div>
-  
-      {/* Google Map */}
-      <div id="map" style={{ height: '1000px', width: '70%' }}></div>
+      </aside>
+
+      <main className="map-pane">
+        <div id="map"></div>
+      </main>
     </div>
   );
 }

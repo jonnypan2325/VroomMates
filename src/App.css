@@ -155,3 +155,122 @@ pre {
 .driver-input-group button {
   margin-top: 10px; /* Adds space above the button */
 }
+
+.app-shell {
+  display: flex;
+  flex-direction: row;
+  height: 100vh;
+  overflow: hidden;
+}
+
+.sidebar {
+  width: 30%;
+  padding: 20px;
+  background-color: #fff5f5;
+  box-sizing: border-box;
+  overflow-y: auto;
+  max-height: 100vh;
+}
+
+.map-pane {
+  flex: 1;
+  min-width: 0;
+}
+
+#map {
+  width: 100%;
+  height: 100vh;
+}
+
+.mobile-tabs {
+  display: none;
+}
+
+.edit-section {
+  margin: 12px 0;
+}
+
+.edit-summary {
+  cursor: pointer;
+  color: #2a6eb3;
+  font-family: Arial, sans-serif;
+  font-weight: bold;
+  padding: 6px 0;
+  list-style: none;
+}
+
+.edit-summary::-webkit-details-marker {
+  display: none;
+}
+
+.edit-summary::before {
+  content: '▸ ';
+}
+
+.edit-section[open] .edit-summary::before {
+  content: '▾ ';
+}
+
+@media (max-width: 768px) {
+  .app-shell {
+    flex-direction: column;
+    height: auto;
+    overflow: visible;
+  }
+
+  .mobile-tabs {
+    display: flex;
+    gap: 8px;
+    padding: 8px;
+    background: #fff5f5;
+    position: sticky;
+    top: 0;
+    z-index: 10;
+  }
+
+  .mobile-tabs button {
+    flex: 1;
+    background: #fff;
+    border: 2px solid #d3d3d3;
+    border-radius: 40px;
+    padding: 8px 12px;
+    color: #2a6eb3;
+    font-family: Arial, sans-serif;
+    font-weight: bold;
+    cursor: pointer;
+  }
+
+  .mobile-tabs button[aria-selected="true"] {
+    background: #4285f4;
+    color: white;
+    border-color: #4285f4;
+  }
+
+  .sidebar,
+  .map-pane {
+    width: 100%;
+    max-height: none;
+  }
+
+  #map {
+    height: calc(100vh - 56px);
+  }
+
+  .app-shell[data-active-tab="inputs"] .map-pane {
+    display: none;
+  }
+
+  .app-shell[data-active-tab="map"] .sidebar {
+    display: none;
+  }
+
+  .sidebar input[type="text"] {
+    width: 100%;
+    box-sizing: border-box;
+  }
+
+  .driver-input-group,
+  .passenger-input-group {
+    flex-wrap: wrap;
+  }
+}
