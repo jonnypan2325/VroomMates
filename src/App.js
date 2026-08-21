@@ -1,13 +1,49 @@
 import './App.css';
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import LocationInput from './LocationInput';
 import { googleLogout, useGoogleLogin } from '@react-oauth/google';
 import axios from 'axios';
+
+const MIN_SIDEBAR_PERCENT = 22;
+const MAX_SIDEBAR_PERCENT = 60;
 
 function App() {
    const [map, setMap] = useState(null); // State for the Google Map instance
   const [directionsRenderer, setDirectionsRenderer] = useState(null); // State for DirectionsRenderer instance
   const [routeData, setRouteData] = useState(null); // State for route data
+
+  // State for the draggable divider between the controls and the map
+  const [sidebarWidth, setSidebarWidth] = useState(32); // percent
+  const shellRef = useRef(null);
+  const isResizing = useRef(false);
+
+  const stopResizing = useCallback(() => {
+    isResizing.current = false;
+    document.body.style.cursor = '';
+    document.body.style.userSelect = '';
+  }, []);
+
+  const startResizing = useCallback(() => {
+    isResizing.current = true;
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+  }, []);
+
+  const handleResize = useCallback((e) => {
+    if (!isResizing.current || !shellRef.current) return;
+    const rect = shellRef.current.getBoundingClientRect();
+    const percent = ((e.clientX - rect.left) / rect.width) * 100;
+    setSidebarWidth(Math.min(MAX_SIDEBAR_PERCENT, Math.max(MIN_SIDEBAR_PERCENT, percent)));
+  }, []);
+
+  useEffect(() => {
+    document.addEventListener('mousemove', handleResize);
+    document.addEventListener('mouseup', stopResizing);
+    return () => {
+      document.removeEventListener('mousemove', handleResize);
+      document.removeEventListener('mouseup', stopResizing);
+    };
+  }, [handleResize, stopResizing]);
 
   // State for handling user and profile data
   const [user, setUser] = useState(null);
@@ -105,46 +141,51 @@ function App() {
   }, []); // Ensure this runs only once, when the component mounts
         
   return (
-    <div style={{ display: 'flex' }}>
-      <div style={{ width: '30%', padding: '20px', backgroundColor: '#fff5f5' }}>
-        <h1>VroomMates</h1>
-        <p>Enter locations for drivers, passengers, and destination:</p>
-        {/* Google Login Button */}
-        {profile ? (
-          <div>
-            {/* <img src={profile.picture} alt="user" /> */}
-            {/* <h3>User Logged in</h3> */}
-            {/* <p>Name: {profile.name}</p> */}
-            {/* <p>Email Address: {profile.email}</p> */}
-            <p>Hello, {profile.given_name}</p>
-            <button className="google-btn google-logout-btn" onClick={logOut}>
-              <span> Log out </span> 👋
-            </button>
-          </div>
-        ) : (
-          <button className="google-btn" onClick={() => login()}>Sign in with Google 🚀</button>
-        )}
-  
-        {/* Location Input Component */}
-        <LocationInput
-          map={map}
-          directionsRenderer={directionsRenderer}
-          setRouteData={setRouteData}
-        />
-  
-        {/* Display route data */}
-        {routeData && (
-          <div>
-            <h3>Optimized Route Data</h3>
-            <pre>{JSON.stringify(routeData, null, 2)}</pre>
-          </div>
-        )}
-  
-        
+    <div className="app-shell" ref={shellRef}>
+      <div className="sidebar" style={{ width: `${sidebarWidth}%` }}>
+        <div className="sidebar-card">
+          <h1 className="brand-title">VroomMates</h1>
+          <p className="brand-subtitle">Enter locations for drivers, passengers, and destination:</p>
+          {/* Google Login Button */}
+          {profile ? (
+            <div>
+              <p>Hello, {profile.given_name}</p>
+              <button className="google-btn google-logout-btn" onClick={logOut}>
+                <span> Log out </span> 👋
+              </button>
+            </div>
+          ) : (
+            <button className="google-btn" onClick={() => login()}>Sign in with Google 🚀</button>
+          )}
+
+          {/* Location Input Component */}
+          <LocationInput
+            map={map}
+            directionsRenderer={directionsRenderer}
+            setRouteData={setRouteData}
+          />
+
+          {/* Display route data */}
+          {routeData && (
+            <div className="route-data-card">
+              <h3>Optimized Route Data</h3>
+              <pre>{JSON.stringify(routeData, null, 2)}</pre>
+            </div>
+          )}
+        </div>
       </div>
-  
+
+      {/* Draggable divider between the controls and the map */}
+      <div
+        className="resizer"
+        onMouseDown={startResizing}
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Resize panels"
+      />
+
       {/* Google Map */}
-      <div id="map" style={{ height: '1000px', width: '70%' }}></div>
+      <div id="map"></div>
     </div>
   );
 }
