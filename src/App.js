@@ -8,7 +8,7 @@ const MIN_SIDEBAR_PERCENT = 22;
 const MAX_SIDEBAR_PERCENT = 60;
 
 function App() {
-   const [map, setMap] = useState(null); // State for the Google Map instance
+  const [map, setMap] = useState(null); // State for the Google Map instance
   const [directionsRenderer, setDirectionsRenderer] = useState(null); // State for DirectionsRenderer instance
   const [routeData, setRouteData] = useState(null); // State for route data
 
@@ -79,7 +79,6 @@ function App() {
     setProfile(null);
     console.log("User signed out");
   };
-  
 
   useEffect(() => {
     const initMap = () => {
@@ -139,7 +138,7 @@ function App() {
       window.onload = initMap;
     }
   }, []); // Ensure this runs only once, when the component mounts
-        
+
   return (
     <div className="app-shell" ref={shellRef}>
       <div className="sidebar" style={{ width: `${sidebarWidth}%` }}>
@@ -151,11 +150,11 @@ function App() {
             <div>
               <p>Hello, {profile.given_name}</p>
               <button className="google-btn google-logout-btn" onClick={logOut}>
-                <span> Log out </span> 👋
+                Log out
               </button>
             </div>
           ) : (
-            <button className="google-btn" onClick={() => login()}>Sign in with Google 🚀</button>
+            <button className="google-btn" onClick={() => login()}>Sign in with Google</button>
           )}
 
           {/* Location Input Component */}
