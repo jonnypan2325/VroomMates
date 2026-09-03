@@ -11,6 +11,9 @@ body {
     sans-serif;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+  /* the app manages its own scrolling regions */
+  overscroll-behavior: none;
+  -webkit-text-size-adjust: 100%;
 }
 
 code {
