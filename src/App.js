@@ -1,8 +1,7 @@
 import React, { useState } from 'react';
 import './App.css';
 import LocationInput from './LocationInput';
-import { MOBILE_QUERY } from './breakpoints';
-import useMediaQuery from './hooks/useMediaQuery';
+import useMediaQuery, { MOBILE_QUERY } from './hooks/useMediaQuery';
 import useGoogleMap from './hooks/useGoogleMap';
 import useGoogleProfile from './hooks/useGoogleProfile';
 import useResizablePanels from './hooks/useResizablePanels';
@@ -15,16 +14,13 @@ function App() {
   const isStacked = useMediaQuery(MOBILE_QUERY);
   const { map, directionsRenderer } = useGoogleMap(MAP_CONTAINER_ID);
   const { profile, login, logOut } = useGoogleProfile();
-  const { containerRef, sidebarWidth, mapHeight, startResizing } = useResizablePanels(isStacked);
+  const { containerRef, panelStyle, startResizing } = useResizablePanels(isStacked);
 
-  // Each layout drives one axis; CSS overrides the other, so a stale value here
-  // can never break the layout.
-  const sidebarStyle = isStacked ? {} : { width: `${sidebarWidth}%` };
-  const mapStyle = isStacked ? { height: `${mapHeight}%` } : {};
-
+  // panelStyle publishes both sizes as CSS variables; each layout's stylesheet
+  // rules consume the one that applies, so neither can strand the other.
   return (
-    <div className="app-shell" ref={containerRef}>
-      <div className="sidebar" style={sidebarStyle}>
+    <div className="app-shell" ref={containerRef} style={panelStyle}>
+      <div className="sidebar">
         <div className="sidebar-card">
           <h1 className="brand-title">VroomMates</h1>
           <p className="brand-subtitle">
@@ -65,10 +61,10 @@ function App() {
         onPointerDown={startResizing}
         role="separator"
         aria-orientation={isStacked ? 'horizontal' : 'vertical'}
-        aria-label={isStacked ? 'Resize map, or tap to expand' : 'Resize panels'}
+        aria-label={isStacked ? 'Resize map' : 'Resize panels'}
       />
 
-      <div id={MAP_CONTAINER_ID} style={mapStyle} />
+      <div id={MAP_CONTAINER_ID} />
     </div>
   );
 }

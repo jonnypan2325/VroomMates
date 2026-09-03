@@ -1,6 +1,13 @@
 import { useEffect, useState } from 'react';
 
 /**
+ * Mirrored by the breakpoint in App.css. The stacked (map-over-panel) layout
+ * and the JS driving the divider must agree on where the layout flips, so
+ * update this and App.css together.
+ */
+export const MOBILE_QUERY = '(max-width: 768px)';
+
+/**
  * Tracks whether a CSS media query currently matches.
  *
  * Some browsers don't reliably deliver the MediaQueryList 'change' event, so we

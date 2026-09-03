@@ -10,14 +10,6 @@ const MIN_MAP_PERCENT = 25;
 const MAX_MAP_PERCENT = 78;
 const DEFAULT_MAP_PERCENT = 45;
 
-// Heights the map snaps between when the handle is tapped rather than dragged.
-const MAP_SNAP_TALL = 72;
-const MAP_SNAP_SHORT = 40;
-const MAP_SNAP_MIDPOINT = (MAP_SNAP_TALL + MAP_SNAP_SHORT) / 2;
-
-// Pointer travel below this counts as a tap, not a drag.
-const TAP_SLOP_PX = 4;
-
 const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
 
 /**
@@ -27,36 +19,25 @@ const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
  * `isStacked` is true the panels sit map-over-panel and the divider moves
  * vertically; otherwise they sit side by side and it moves horizontally.
  *
- * Returns percentages rather than pixels so the split survives a viewport
- * change, and so CSS can fall back to a sensible default if these are unset.
+ * Both sizes are returned as percentages and published as CSS custom
+ * properties, so each layout's stylesheet rules pick the one that applies.
  */
 export default function useResizablePanels(isStacked) {
   const [sidebarWidth, setSidebarWidth] = useState(DEFAULT_SIDEBAR_PERCENT);
   const [mapHeight, setMapHeight] = useState(DEFAULT_MAP_PERCENT);
 
   const containerRef = useRef(null);
-  const drag = useRef({ active: false, moved: false, startX: 0, startY: 0 });
+  const isDragging = useRef(false);
 
-  const startResizing = useCallback(
-    (event) => {
-      drag.current = { active: true, moved: false, startX: event.clientX, startY: event.clientY };
-      document.body.style.cursor = isStacked ? 'row-resize' : 'col-resize';
-      document.body.style.userSelect = 'none';
-    },
-    [isStacked]
-  );
+  const startResizing = useCallback(() => {
+    isDragging.current = true;
+    document.body.style.cursor = isStacked ? 'row-resize' : 'col-resize';
+    document.body.style.userSelect = 'none';
+  }, [isStacked]);
 
   const resize = useCallback(
     (event) => {
-      const state = drag.current;
-      if (!state.active || !containerRef.current) return;
-
-      if (
-        Math.abs(event.clientX - state.startX) > TAP_SLOP_PX ||
-        Math.abs(event.clientY - state.startY) > TAP_SLOP_PX
-      ) {
-        state.moved = true;
-      }
+      if (!isDragging.current || !containerRef.current) return;
 
       const bounds = containerRef.current.getBoundingClientRect();
       if (isStacked) {
@@ -71,18 +52,11 @@ export default function useResizablePanels(isStacked) {
   );
 
   const stopResizing = useCallback(() => {
-    const state = drag.current;
-    if (!state.active) return;
-
-    // Tapping the stacked handle toggles the map between tall and short.
-    if (isStacked && !state.moved) {
-      setMapHeight((height) => (height > MAP_SNAP_MIDPOINT ? MAP_SNAP_SHORT : MAP_SNAP_TALL));
-    }
-
-    state.active = false;
+    if (!isDragging.current) return;
+    isDragging.current = false;
     document.body.style.cursor = '';
     document.body.style.userSelect = '';
-  }, [isStacked]);
+  }, []);
 
   // Listen on the document so a fast drag that outruns the handle still tracks.
   useEffect(() => {
@@ -97,5 +71,10 @@ export default function useResizablePanels(isStacked) {
     };
   }, [resize, stopResizing]);
 
-  return { containerRef, sidebarWidth, mapHeight, startResizing };
+  const panelStyle = {
+    '--sidebar-width': `${sidebarWidth}%`,
+    '--map-height': `${mapHeight}%`,
+  };
+
+  return { containerRef, panelStyle, startResizing };
 }
