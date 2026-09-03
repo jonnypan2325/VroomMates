@@ -1,290 +1,210 @@
 import React, { useCallback, useEffect, useState } from 'react';
+import AddressInput from './components/AddressInput';
+
+const API_BASE_URL = process.env.REACT_APP_FLASK_API_URL || 'http://127.0.0.1:5000';
+const ROUTE_OPTIMIZER_URL = `${API_BASE_URL}/routeoptimizer/`;
+
+const emptyCoordinates = () => ({ lat: null, lng: null });
+const newDriver = () => ({ address: '', capacity: 0, coordinates: emptyCoordinates() });
+const newPassenger = () => ({ address: '', coordinates: emptyCoordinates() });
+
+const hasCoordinates = ({ lat, lng }) => lat != null && lng != null;
+
+/** Returns a new list with `patch` merged into the item at `index`. */
+const updateAt = (list, index, patch) =>
+  list.map((item, i) => (i === index ? { ...item, ...patch } : item));
 
 function LocationInput({ map, directionsRenderer, setRouteData }) {
-    const [driverData, setDriverData] = useState([
-        { address: '', capacity: 0, coordinates: { lat: null, lng: null } }
-    ]);
-    const [passengerLocs, setPassengerLocs] = useState([
-        { address: '', coordinates: { lat: null, lng: null } }
-    ]);
-    const [destination, setDestination] = useState({ address: '', coordinates: { lat: null, lng: null } });
-    const [optimizedRoutes, setOptimizedRoutes] = useState([]);
-    const [errorMessage, setErrorMessage] = useState('');
-    const [selectedDriver, setSelectedDriver] = useState(0); 
+  const [driverData, setDriverData] = useState([newDriver()]);
+  const [passengerLocs, setPassengerLocs] = useState([newPassenger()]);
+  const [destination, setDestination] = useState(newPassenger());
+  const [optimizedRoutes, setOptimizedRoutes] = useState([]);
+  const [selectedDriver, setSelectedDriver] = useState(0);
+  const [errorMessage, setErrorMessage] = useState('');
 
-    const displayRoutesForDriver = useCallback((route) => {
-        console.log("Displaying Route");
-        const [driver, ...passengers] = route;
+  const displayRoutesForDriver = useCallback(
+    (route) => {
+      const [driver, ...stops] = route;
+      const finalStop = stops[stops.length - 1];
+      if (!driver || !finalStop || !directionsRenderer) return;
 
-        const waypoints = passengers.slice(0, -1).map((location) => ({
-            location: new window.google.maps.LatLng(location.lat, location.lng),
-            stopover: true
-        }));
+      const waypoints = stops.slice(0, -1).map((stop) => ({
+        location: new window.google.maps.LatLng(stop.lat, stop.lng),
+        stopover: true,
+      }));
 
-        const finalDestination = passengers[passengers.length - 1];
-
-        const directionsService = new window.google.maps.DirectionsService();
-        directionsService.route(
-            {
-                origin: new window.google.maps.LatLng(driver.lat, driver.lng),
-                destination: new window.google.maps.LatLng(finalDestination.lat, finalDestination.lng),
-                waypoints: waypoints,
-                travelMode: window.google.maps.TravelMode.DRIVING
-            },
-            (response, status) => {
-                if (status === 'OK') {
-                    directionsRenderer.setDirections(response); // Display the route on the map
-                } else {
-                    console.error('Directions request failed due to ' + status);
-                }
-            }
-        );
-    }, [directionsRenderer]);
-
-    useEffect(() => {
-        console.log("test");
-        console.log("optimizedRoutes: ", optimizedRoutes);
-        if (optimizedRoutes && optimizedRoutes.length > 0) {
-            console.log("Running");
-            displayRoutesForDriver(optimizedRoutes[selectedDriver]);
+      const directionsService = new window.google.maps.DirectionsService();
+      directionsService.route(
+        {
+          origin: new window.google.maps.LatLng(driver.lat, driver.lng),
+          destination: new window.google.maps.LatLng(finalStop.lat, finalStop.lng),
+          waypoints,
+          travelMode: window.google.maps.TravelMode.DRIVING,
+        },
+        (response, status) => {
+          if (status === 'OK') {
+            directionsRenderer.setDirections(response);
+          } else {
+            console.error(`Directions request failed: ${status}`);
+          }
         }
-    }, [optimizedRoutes, selectedDriver, displayRoutesForDriver]);
+      );
+    },
+    [directionsRenderer]
+  );
 
-    // Handle driver changes (both address and coordinates)
-    const handleDriverChange = useCallback((index, locationData) => {
-        setDriverData((prev) => {
-            const updated = [...prev];
-            updated[index] = { ...updated[index], ...locationData };
-            return updated;
-        });
-    }, []);
+  useEffect(() => {
+    const route = optimizedRoutes[selectedDriver];
+    if (route) displayRoutesForDriver(route);
+  }, [optimizedRoutes, selectedDriver, displayRoutesForDriver]);
 
-    // Handle passenger changes (both address and coordinates)
-    const handlePassengerChange = useCallback((index, locationData) => {
-        setPassengerLocs((prev) => {
-            const updated = [...prev];
-            updated[index] = { ...updated[index], ...locationData };
-            return updated;
-        });
-    }, []);
+  const handleDriverChange = useCallback(
+    (index, patch) => setDriverData((prev) => updateAt(prev, index, patch)),
+    []
+  );
 
-    useEffect(() => {
-        if (map && directionsRenderer) {
-            // Driver Autocomplete
-            driverData.forEach((_, index) => {
-                const input = document.getElementById(`location-input-${index}`);
-                if (input) {
-                    const autocomplete = new window.google.maps.places.Autocomplete(input);
-                    autocomplete.bindTo('bounds', map);
-                    autocomplete.addListener('place_changed', () => {
-                        const place = autocomplete.getPlace();
-                        if (!place.geometry || !place.geometry.location) {
-                            console.log("No details available for input: '" + place.name + "'");
-                            return;
-                        }
-                        // Update address and coordinates for the driver
-                        handleDriverChange(index, {
-                            address: place.formatted_address,
-                            coordinates: {
-                                lat: place.geometry.location.lat(),
-                                lng: place.geometry.location.lng(),
-                            }
-                        });
-                    });
-                }
-            });
+  const handlePassengerChange = useCallback(
+    (index, patch) => setPassengerLocs((prev) => updateAt(prev, index, patch)),
+    []
+  );
 
-            // Passenger Autocomplete
-            passengerLocs.forEach((_, index) => {
-                const input = document.getElementById(`passenger-loc-${index}`);
-                if (input) {
-                    const autocomplete = new window.google.maps.places.Autocomplete(input);
-                    autocomplete.bindTo('bounds', map);
-                    autocomplete.addListener('place_changed', () => {
-                        const place = autocomplete.getPlace();
-                        if (!place.geometry || !place.geometry.location) {
-                            console.log("No details available for input: '" + place.name + "'");
-                            return;
-                        }
-                        // Update address and coordinates for the passenger
-                        handlePassengerChange(index, {
-                            address: place.formatted_address,
-                            coordinates: {
-                                lat: place.geometry.location.lat(),
-                                lng: place.geometry.location.lng(),
-                            }
-                        });
-                    });
-                }
-            });
+  const handleCapacityChange = (index, rawValue) => {
+    const capacity = Number.parseInt(rawValue, 10);
+    handleDriverChange(index, { capacity: Number.isNaN(capacity) ? 0 : capacity });
+  };
 
-            // Destination Autocomplete
-            const destInput = document.getElementById('destination');
-            if (destInput) {
-                const destAutocomplete = new window.google.maps.places.Autocomplete(destInput);
-                destAutocomplete.bindTo('bounds', map);
-                destAutocomplete.addListener('place_changed', () => {
-                    const place = destAutocomplete.getPlace();
-                    if (!place.geometry || !place.geometry.location) {
-                        console.log("No details available for destination input");
-                        return;
-                    }
-                    // Update address and coordinates for the destination
-                    setDestination({
-                        address: place.formatted_address,
-                        coordinates: {
-                            lat: place.geometry.location.lat(),
-                            lng: place.geometry.location.lng(),
-                        }
-                    });
-                });
-            }
-        }
-    }, [map, directionsRenderer, driverData, passengerLocs, handleDriverChange, handlePassengerChange]);
+  const addDriver = () => setDriverData((prev) => [...prev, newDriver()]);
+  const addPassenger = () => setPassengerLocs((prev) => [...prev, newPassenger()]);
 
-    const handleDriverCapacityChange = (index, value) => {
-        const updatedDrivers = [...driverData];
-        updatedDrivers[index].capacity = value;
-        setDriverData(updatedDrivers);
-    };
+  const requestOptimizedRoutes = async (drivers, passengers, destinationCoords) => {
+    try {
+      const response = await fetch(ROUTE_OPTIMIZER_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ drivers, passengers, destination: destinationCoords }),
+      });
 
-    const addDriverField = () => setDriverData([...driverData, { address: '', capacity: 0, coordinates: { lat: null, lng: null } }]);
+      if (!response.ok) {
+        const errorBody = await response.json().catch(() => null);
+        const backendMessage = errorBody?.error || response.statusText || 'Unknown error';
+        setErrorMessage(`The route optimizer rejected the request: ${backendMessage}`);
+        return;
+      }
 
-    const addPassengerField = () => setPassengerLocs([...passengerLocs, { address: '', coordinates: { lat: null, lng: null } }]);
+      const result = await response.json();
+      if (!result.optimizedRoutes?.length) {
+        setErrorMessage('No optimized routes were returned. Please check your inputs and try again.');
+        return;
+      }
 
-    const handleLocSubmit = async () => {
-        setErrorMessage('');
-        try {
-            const driverCoords = driverData.map(driver => driver.coordinates);
-            const passengerCoords = passengerLocs.map(passenger => passenger.coordinates);
-            const destCoords = destination.coordinates;
+      setSelectedDriver(0);
+      setOptimizedRoutes(result.optimizedRoutes);
+    } catch (error) {
+      console.error('Error sending coordinates to route optimizer:', error);
+      setErrorMessage(
+        'Could not reach the route optimizer service. Please make sure the backend is running and try again.'
+      );
+    }
+  };
 
-            const hasInvalidDriver = driverCoords.some(c => c.lat == null || c.lng == null);
-            const hasInvalidPassenger = passengerCoords.some(c => c.lat == null || c.lng == null);
-            const hasInvalidDestination = destCoords.lat == null || destCoords.lng == null;
+  const handleSubmit = () => {
+    setErrorMessage('');
 
-            if (hasInvalidDriver || hasInvalidPassenger || hasInvalidDestination) {
-                setErrorMessage('Please enter a valid address for every driver, passenger, and the destination before submitting.');
-                return;
-            }
+    const driverCoords = driverData.map((driver) => driver.coordinates);
+    const passengerCoords = passengerLocs.map((passenger) => passenger.coordinates);
 
-            await sendCoordsToRouteOptimizer(driverCoords, passengerCoords, destCoords);
-        } catch (error) {
-            console.error('Error processing locations', error);
-            setErrorMessage('Something went wrong while preparing your locations. Please try again.');
-        }
-    };
+    const allComplete = [...driverCoords, ...passengerCoords, destination.coordinates].every(
+      hasCoordinates
+    );
+    if (!allComplete) {
+      setErrorMessage(
+        'Please enter a valid address for every driver, passenger, and the destination before submitting.'
+      );
+      return;
+    }
 
-    const sendCoordsToRouteOptimizer = async (driverCoords, passengerCoords, destCoords) => {
-        const routeOptimizerURL = `${process.env.REACT_APP_FLASK_API_URL || 'http://127.0.0.1:5000'}/routeoptimizer/`;
+    const drivers = driverCoords.map((coordinates, index) => ({
+      location: coordinates,
+      capacity: driverData[index].capacity,
+    }));
 
-        const driverDataWithCoords = driverCoords.map((coords, index) => ({
-            location: coords,
-            capacity: driverData[index].capacity,
-        }));
+    return requestOptimizedRoutes(drivers, passengerCoords, destination.coordinates);
+  };
 
-        try {
-            const response = await fetch(routeOptimizerURL, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    drivers: driverDataWithCoords,
-                    passengers: passengerCoords,
-                    destination: destCoords,
-                })
-            });
-
-            if (!response.ok) {
-                const errorBody = await response.json().catch(() => null);
-                const backendMessage = errorBody?.error || response.statusText || 'Unknown error';
-                setErrorMessage(`The route optimizer rejected the request: ${backendMessage}`);
-                return;
-            }
-
-            const result = await response.json();
-            console.log("Optimized Routes from Flask:", JSON.stringify(result.optimizedRoutes, null, 2));
-
-            if (!result.optimizedRoutes || result.optimizedRoutes.length === 0) {
-                setErrorMessage('No optimized routes were returned. Please check your inputs and try again.');
-                return;
-            }
-
-            setOptimizedRoutes(result.optimizedRoutes);
-
-        } catch (error) {
-            console.error('Error sending coordinates to route optimizer:', error);
-            setErrorMessage(
-                'Could not reach the route optimizer service. Please make sure the backend is running and try again.'
-            );
-        }
-    };
-
-    const handleDriverView = async (index) => {
-        console.log(`Displaying route for driver ${index + 1}`);
-        const selectedDriverIndex = parseInt(index.target.value);
-        setSelectedDriver(selectedDriverIndex); 
-    };
-
-    return (
-        <div>
-            <h3>Driver Locations and Capacities</h3>
-            {driverData.map((driver, index) => (
-                <div key={index} className="driver-input-group">
-                    <input
-                        type="number"
-                        value={driver.capacity}
-                        onChange={(e) => handleDriverCapacityChange(index, parseInt(e.target.value))}
-                        placeholder={`Driver ${index + 1} capacity`}
-                        min="1"
-                    />
-                    <input
-                        type="text"
-                        id={`location-input-${index}`}
-                        value={driver.address}
-                        onChange={(e) => handleDriverChange(index, { address: e.target.value, coordinates: driver.coordinates })}
-                        placeholder={`Driver ${index + 1} location`}
-                    />
-                </div>
-            ))}
-            <button onClick={addDriverField}>Add Driver</button>
-    
-            <h3>Passenger Locations</h3>
-            {passengerLocs.map((passenger, index) => (
-                <div key={index} className="passenger-input-group">
-                    <input
-                        id={`passenger-loc-${index}`}
-                        type="text"
-                        value={passenger.address}
-                        onChange={(e) => handlePassengerChange(index, { address: e.target.value, coordinates: passenger.coordinates })}
-                        placeholder={`Passenger ${index + 1} location`}
-                    />
-                </div>
-            ))}
-            <button onClick={addPassengerField}>Add Passenger</button>
-    
-            <h3>Destination</h3>
-            <input
-                type="text"
-                id="destination"
-                value={destination.address}
-                onChange={(e) => setDestination({ address: e.target.value, coordinates: destination.coordinates })}
-                placeholder="Destination"
-            />
-    
-            <button onClick={handleLocSubmit}>Submit All Locations</button>
-    
-            <h3>Driver View:</h3>
-            <select id="driver-view-select" value={selectedDriver} onChange={handleDriverView}>
-                {driverData.map((_, index) => (
-                    <option key={index} value={index}>
-                        {index + 1}
-                    </option>
-                ))}
-            </select>
-
-            {errorMessage && <p style={{ color: 'red' }}>{errorMessage}</p>}
+  return (
+    <div>
+      <h3>Driver Locations and Capacities</h3>
+      {driverData.map((driver, index) => (
+        <div key={index} className="driver-input-group">
+          <input
+            type="number"
+            inputMode="numeric"
+            min="1"
+            value={driver.capacity}
+            aria-label={`Driver ${index + 1} capacity`}
+            placeholder="Seats"
+            onChange={(event) => handleCapacityChange(index, event.target.value)}
+          />
+          <AddressInput
+            map={map}
+            value={driver.address}
+            label={`Driver ${index + 1} location`}
+            placeholder={`Driver ${index + 1} location`}
+            onChange={(patch) => handleDriverChange(index, patch)}
+          />
         </div>
-    );    
+      ))}
+      <button onClick={addDriver}>Add Driver</button>
+
+      <h3>Passenger Locations</h3>
+      {passengerLocs.map((passenger, index) => (
+        <div key={index} className="passenger-input-group">
+          <AddressInput
+            map={map}
+            value={passenger.address}
+            label={`Passenger ${index + 1} location`}
+            placeholder={`Passenger ${index + 1} location`}
+            onChange={(patch) => handlePassengerChange(index, patch)}
+          />
+        </div>
+      ))}
+      <button onClick={addPassenger}>Add Passenger</button>
+
+      <h3>Destination</h3>
+      <AddressInput
+        map={map}
+        className="full-width-input"
+        value={destination.address}
+        label="Destination"
+        placeholder="Destination"
+        onChange={(patch) => setDestination((prev) => ({ ...prev, ...patch }))}
+      />
+
+      <button className="submit-btn" onClick={handleSubmit}>
+        Submit All Locations
+      </button>
+
+      <h3>Driver View:</h3>
+      <select
+        className="full-width-input"
+        aria-label="Driver view"
+        value={selectedDriver}
+        onChange={(event) => setSelectedDriver(Number.parseInt(event.target.value, 10))}
+      >
+        {driverData.map((_, index) => (
+          <option key={index} value={index}>
+            {index + 1}
+          </option>
+        ))}
+      </select>
+
+      {errorMessage && (
+        <p className="error-message" role="alert">
+          {errorMessage}
+        </p>
+      )}
+    </div>
+  );
 }
 
 export default LocationInput;
