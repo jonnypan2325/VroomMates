@@ -21,6 +21,7 @@ build/
 dist/
 
 # misc
+.local/
 .DS_Store
 .env.local
 .env.development.local
