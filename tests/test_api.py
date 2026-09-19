@@ -1,8 +1,11 @@
 """Characterize the public API through the runnable root application."""
 
 import unittest
+from unittest.mock import patch
 
 import app as root_app
+from backend.routes import optimized_routes_store
+from backend.validation import ValidationError, parse_route_request
 
 
 def valid_payload():
@@ -16,13 +19,39 @@ def valid_payload():
     }
 
 
+class ValidationTests(unittest.TestCase):
+    def test_parsing_converts_coordinates_to_longitude_latitude(self):
+        payload = valid_payload()
+        payload["drivers"][0]["location"] = {"lat": "40.0", "lng": "-74.0"}
+        drivers, passengers, destination = parse_route_request(payload)
+        self.assertEqual([d.get_coords() for d in drivers], [(-74.0, 40.0), (-74.4, 40.3)])
+        self.assertEqual([d.get_driver_num() for d in drivers], [0, 1])
+        self.assertEqual([d.get_capacity() for d in drivers], [1, 1])
+        self.assertEqual([p.get_coords() for p in passengers], [(-74.1, 40.1)])
+        self.assertEqual([p.get_passenger_num() for p in passengers], [0])
+        self.assertEqual(destination, (-74.2, 40.5))
+
+    def test_validation_errors_preserve_message_and_order(self):
+        cases = [
+            (None, "Request body must be a JSON object"),
+            ({}, "drivers must be a non-empty list"),
+            ({"drivers": [None]}, "passengers must be a non-empty list"),
+            ({"drivers": [None], "passengers": [None]}, "destination must include lat and lng"),
+        ]
+        for payload, message in cases:
+            with self.subTest(payload=payload):
+                with self.assertRaises(ValidationError) as caught:
+                    parse_route_request(payload)
+                self.assertEqual(str(caught.exception), message)
+
+
 class ApiContractTests(unittest.TestCase):
     def setUp(self):
-        root_app.optimized_routes_store.clear()
+        optimized_routes_store.clear()
         previous_testing = root_app.app.config["TESTING"]
         root_app.app.config["TESTING"] = True
         self.addCleanup(root_app.app.config.update, TESTING=previous_testing)
-        self.addCleanup(root_app.optimized_routes_store.clear)
+        self.addCleanup(optimized_routes_store.clear)
         self.client = root_app.app.test_client()
 
     def assert_error(self, response, message, status=400):
@@ -80,6 +109,16 @@ class ApiContractTests(unittest.TestCase):
         stored = self.client.get("/routeoptimizer/")
         self.assertEqual(stored.status_code, 200)
         self.assertEqual(stored.get_json(), second.get_json())
+
+    def test_unexpected_optimizer_failure_preserves_last_success(self):
+        success = self.client.post("/routeoptimizer/", json=valid_payload())
+        self.assertEqual(success.status_code, 200)
+        with patch("backend.routes.give_paths", side_effect=RuntimeError("optimizer failed")):
+            with self.assertRaisesRegex(RuntimeError, "optimizer failed"):
+                self.client.post("/routeoptimizer/", json=valid_payload())
+        stored = self.client.get("/routeoptimizer/")
+        self.assertEqual(stored.status_code, 200)
+        self.assertEqual(stored.get_json(), success.get_json())
 
     def test_co_located_passengers(self):
         payload = valid_payload()
