@@ -3,6 +3,7 @@ from dotenv import load_dotenv
 from flask_cors import CORS
 import math
 import heapq
+from itertools import count
 import json
 import logging
 
@@ -53,12 +54,13 @@ class Driver:
     def get_path(self, destination):
         if not self.passengers:
             return [self.get_coords(), destination]
-        open_list = [(0, (self.get_coords(), tuple(self.passengers), []))]
+        sequence = count()
+        open_list = [(0, next(sequence), (self.get_coords(), tuple(self.passengers), []))]
 
         visited = set()
 
         while(open_list):
-            cost, (current_position, remaining_passengers, path_taken) = heapq.heappop(open_list)
+            cost, _, (current_position, remaining_passengers, path_taken) = heapq.heappop(open_list)
 
             if (current_position, remaining_passengers) in visited:
                 continue
@@ -73,10 +75,10 @@ class Driver:
                 new_remaining_passengers = remaining_passengers[:i] + remaining_passengers[i+1:]
                 new_path = path_taken + [passenger.get_coords()]
                 if (passenger.get_coords(), new_remaining_passengers) not in visited:
-                    heapq.heappush(open_list, (new_cost,(passenger.get_coords(),new_remaining_passengers,new_path)))
+                    heapq.heappush(open_list, (new_cost, next(sequence), (passenger.get_coords(),new_remaining_passengers,new_path)))
 
             if not remaining_passengers:
-                heapq.heappush(open_list, (cost+haversine_distance(current_position, destination), (destination, remaining_passengers, path_taken+[destination])))
+                heapq.heappush(open_list, (cost+haversine_distance(current_position, destination), next(sequence), (destination, remaining_passengers, path_taken+[destination])))
 
 
 class Passenger:

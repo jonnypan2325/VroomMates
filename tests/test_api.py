@@ -81,6 +81,20 @@ class ApiContractTests(unittest.TestCase):
         self.assertEqual(stored.status_code, 200)
         self.assertEqual(stored.get_json(), second.get_json())
 
+    def test_co_located_passengers(self):
+        payload = valid_payload()
+        payload["drivers"] = payload["drivers"][:1]
+        payload["drivers"][0]["capacity"] = 2
+        pickup = payload["passengers"][0]
+        payload["passengers"].append(dict(pickup))
+        response = self.client.post("/routeoptimizer/", json=payload)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json(), {
+            "status": "success",
+            "optimizedRoutes": [[payload["drivers"][0]["location"],
+                                 pickup, pickup, payload["destination"]]],
+        })
+
     def test_invalid_body(self):
         cases = [
             {},
