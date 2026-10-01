@@ -1,13 +1,59 @@
 """Protect domain invariants without freezing heuristic route choices."""
 
 import math
+import heapq
+from itertools import permutations
 import unittest
+from unittest.mock import patch
 
 from backend.models import Driver, Passenger
 from backend.optimizer import assign_drivers, give_paths, haversine_distance
 
 
 class OptimizerTests(unittest.TestCase):
+    def test_eighteen_shared_pickups_do_not_expand_identity_permutations(self):
+        driver = Driver(-74, 40, 18, 0)
+        pickup = (-74.1, 40.1)
+        destination = (-74.2, 40.6)
+        for i in range(18):
+            driver.add_passenger(Passenger(*pickup, i))
+        push = heapq.heappush
+        pushes = 0
+
+        def bounded_push(queue, item):
+            nonlocal pushes
+            pushes += 1
+            # Bound search work instead of relying on machine-dependent elapsed time.
+            self.assertLessEqual(pushes, 20)
+            return push(queue, item)
+
+        with patch("backend.optimizer.heapq.heappush", side_effect=bounded_push):
+            self.assertEqual(driver.get_path(destination),
+                             [driver.get_coords()] + [pickup] * 18 + [destination])
+
+    def test_mixed_shared_pickups_preserve_minimum_existing_search_cost(self):
+        origin, destination = (-74, 40), (-74.2, 40.6)
+        a, b, c = (-74.1, 40.1), (-74.3, 40.2), (-74.4, 40.4)
+        pickups = [a, b, a, c, b]
+        driver = Driver(*origin, len(pickups), 0)
+        for i, pickup in enumerate(pickups):
+            driver.add_passenger(Passenger(*pickup, i))
+
+        def search_cost(stops):
+            current = origin
+            cost = 0
+            for stop in stops:
+                cost += haversine_distance(current, stop) + haversine_distance(stop, destination)
+                current = stop
+            return cost + haversine_distance(current, destination)
+
+        route = driver.get_path(destination)
+        self.assertEqual(route[0], origin)
+        self.assertEqual(route[-1], destination)
+        self.assertCountEqual(route[1:-1], pickups)
+        self.assertAlmostEqual(search_cost(route[1:-1]),
+                               min(search_cost(order) for order in set(permutations(pickups))))
+
     def test_coordinates_and_distance_use_longitude_latitude(self):
         driver = Driver(-74, 40, 2, 7)
         passenger = Passenger(-73, 41, 8)

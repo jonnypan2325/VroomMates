@@ -44,7 +44,14 @@ def order_stops(driver, destination):
         if not remaining_passengers and current_position == destination:
             return [driver.get_coords()] + path_taken
 
+        expanded_pickups = set()
         for i, passenger in enumerate(remaining_passengers):
+            # Equal pickup coordinates have identical costs and successor choices.
+            # Remove one occurrence per step so every passenger retains a pickup.
+            pickup = passenger.get_coords()
+            if pickup in expanded_pickups:
+                continue
+            expanded_pickups.add(pickup)
             new_cost = cost + haversine_distance(current_position, passenger.get_coords()) + haversine_distance(passenger.get_coords(), destination)
             new_remaining_passengers = remaining_passengers[:i] + remaining_passengers[i+1:]
             new_path = path_taken + [passenger.get_coords()]
