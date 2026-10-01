@@ -10,7 +10,7 @@ backend (Flask, in `app.py` and `backend/`) in a single project.
 
 You will need the following installed locally:
 
-- **Node.js** 18 or newer — https://nodejs.org/
+- **Node.js** 24.x — https://nodejs.org/
 - **npm** (ships with Node.js) — verify with `npm --version`
 - **Python** 3.10 or newer — https://www.python.org/downloads/
 - **pip** (ships with Python) — verify with `pip --version`
@@ -194,7 +194,8 @@ In PowerShell, set `$env:CI = "true"` before running the npm test command.
 
 ## Deployment
 
-Vercel builds and deploys the React frontend only. `.vercelignore` excludes
+Vercel builds and deploys the React frontend only. `package.json` selects Node.js
+24.x through `engines.node`, overriding the dashboard runtime setting. `.vercelignore` excludes
 `app.py`, `backend/`, `requirements.txt`, and Python environment/cache files.
 The Flask backend needs a separate host; this repository does not configure one.
 Set `REACT_APP_FLASK_API_URL` to that backend's URL when building the frontend.
