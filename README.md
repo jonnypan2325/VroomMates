@@ -10,14 +10,13 @@ backend (Flask, in `app.py` and `backend/`) in a single project.
 
 You will need the following installed locally:
 
-- **Node.js** 18 or newer — https://nodejs.org/
+- **Node.js** 24.x — https://nodejs.org/
 - **npm** (ships with Node.js) — verify with `npm --version`
 - **Python** 3.10 or newer — https://www.python.org/downloads/
 - **pip** (ships with Python) — verify with `pip --version`
 
-> The repo's existing `requirements.txt` was generated against Python 3.12, so
-> 3.10+ is recommended. On macOS and most Linux distros, `python` and `pip`
-> may be called `python3` and `pip3` — substitute as needed.
+> On macOS and Linux, use `python3` to create the virtual environment.
+> On Windows, use `py -3`. After activation, use `python` and `python -m pip`.
 
 ## 1. Clone and enter the repo
 
@@ -39,20 +38,25 @@ Then open `.env` and replace the placeholder values. See
 
 ## 3. Install Python dependencies
 
-It is strongly recommended to use a virtual environment so the backend's
-packages don't pollute your system Python:
+Create and activate a virtual environment for the backend:
 
 ```bash
-python -m venv .venv
-# macOS / Linux:
+python3 -m venv .venv
 source .venv/bin/activate
-# Windows (PowerShell):
-.venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
+```
 
-pip install -r requirements.txt
+On Windows (PowerShell):
+
+```powershell
+py -3 -m venv .venv
+.venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
 ```
 
 The `.venv/` directory is already listed in `.gitignore`.
+Activate it in each new terminal before running backend commands or `npm run dev`.
+The npm scripts use `python`, which activation resolves to the virtual environment.
 
 ## 4. Install Node dependencies
 
@@ -66,7 +70,7 @@ script below uses to run the frontend and backend together).
 
 ## 5. Run the app
 
-You have three options.
+Activate the virtual environment from step 3, then choose a startup option.
 
 ### Option A — run both servers together (recommended)
 
@@ -80,11 +84,15 @@ process is prefixed with `backend` or `frontend`.
 
 ### Option B — run each server in its own terminal
 
-In one terminal, start the backend:
+In one terminal, activate the virtual environment and start the backend:
 
 ```bash
-python app.py
+source .venv/bin/activate
+npm run backend
 ```
+
+On Windows, activate with `.venv\Scripts\Activate.ps1` instead.
+Running `python app.py` directly starts the same development server.
 
 In a second terminal, start the frontend:
 
@@ -100,7 +108,7 @@ npm start
 | Backend  | http://localhost:5000        |
 
 The frontend talks to the backend over HTTP, so **both servers must be running
-at the same time** for the app to work end-to-end. If you only start one, the
+at the same time** for the app to work end-to-end. If you start only the frontend, the
 UI will load but route optimization requests will fail.
 
 ## Getting the Google credentials
@@ -155,16 +163,63 @@ backend is running. For local development, leave the value in `.env.example`
 | `npm run build`  | Produce a production build of the frontend in `build/`.   |
 | `npm test`       | Run the React test suite.                                 |
 
+## Tests and production build
+
+Run the backend suite from an activated virtual environment:
+
+```bash
+python -m unittest discover -s tests -v
+```
+
+On macOS and Linux, you can also run it without activation:
+
+```bash
+.venv/bin/python -m unittest discover -s tests -v
+```
+
+The backend suite covers the HTTP contract, validation, last-result storage,
+and optimizer invariants. It uses Python's standard-library `unittest`.
+
+Run the frontend checks separately:
+
+```bash
+CI=true npm test -- --watchAll=false
+npm run build
+```
+
+There are currently no authored frontend tests. Jest reports “No tests found”
+and exits with code 1. To check that the runner works despite that absence, run
+`CI=true npm test -- --watchAll=false --passWithNoTests`.
+In PowerShell, set `$env:CI = "true"` before running the npm test command.
+
+## Deployment
+
+Vercel builds and deploys the React frontend only. `package.json` selects Node.js
+24.x through `engines.node`, overriding the dashboard runtime setting. `.vercelignore` excludes
+`app.py`, `backend/`, `requirements.txt`, and Python environment/cache files.
+The Flask backend needs a separate host; this repository does not configure one.
+Set `REACT_APP_FLASK_API_URL` to that backend's URL when building the frontend.
+The `python app.py` command starts a debug development server.
+
 ## Project layout
 
-```
-.
-├── app.py                # Flask backend entrypoint
-├── backend/              # Additional backend modules
-├── public/               # Static assets and HTML shell
-├── src/                  # React frontend source
-├── requirements.txt      # Python dependencies
-├── package.json          # Node dependencies + scripts
-├── .env.example          # Template for local environment variables
-└── .gitignore
+```text
+app.py                    exported Flask app and development server entry point
+backend/
+  __init__.py             create_app, CORS, logging, and route registration
+  routes.py               HTTP handlers, JSON serialization, last-result storage
+  validation.py           request parsing and validation errors
+  models.py               Driver, Passenger, and coordinate type
+  optimizer.py            distance, assignment, stop ordering, and route building
+tests/
+  __init__.py             test package marker
+  test_api.py             root-app HTTP contract, storage, and validation tests
+  test_optimizer.py       domain and optimizer invariant tests
+public/                   static assets and HTML shell
+src/                      React frontend source
+requirements.txt          Python runtime dependencies
+package.json              Node dependencies and npm scripts
+.env.example              template for local environment variables
+.vercelignore             frontend-only deployment exclusions
+.gitignore
 ```
