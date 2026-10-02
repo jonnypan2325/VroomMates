@@ -123,7 +123,7 @@ UI will load but route optimization requests will fail.
 6. Under **Authorized JavaScript origins**, add `http://localhost:3000`.
 7. Under **Authorized redirect URIs**, also add `http://localhost:3000`.
 8. Copy the generated **Client ID** and paste it into `.env` as
-   `REACT_APP_GOOGLE_CLIENT_ID`.
+   `REACT_APP_GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_ID`. The frontend and server must use the same web client ID. Missing `GOOGLE_CLIENT_ID` fails backend startup.
 
 ### Google Maps API key (`REACT_APP_GOOGLE_MAPS_API_KEY`)
 
@@ -168,17 +168,18 @@ backend is running. For local development, leave the value in `.env.example`
 Run the backend suite from an activated virtual environment:
 
 ```bash
-python -m unittest discover -s tests -v
+python -m pip install -r requirements-test.txt
+python -m tests.run_tests
 ```
 
 On macOS and Linux, you can also run it without activation:
 
 ```bash
-.venv/bin/python -m unittest discover -s tests -v
+.venv/bin/python -m pip install -r requirements-test.txt
+.venv/bin/python -m tests.run_tests
 ```
 
-The backend suite covers the HTTP contract, validation, last-result storage,
-and optimizer invariants. It uses Python's standard-library `unittest`.
+The backend suite covers the HTTP contract, validation, last-result storage, optimizer invariants, and real Google verification using synthetic RSA tokens. `tests.run_tests` disables dotenv before discovery/root-app imports and injects a synthetic expected audience; it never needs real credentials or certificate network calls. It uses Python's standard-library `unittest`.
 
 Run the frontend checks separately:
 
@@ -207,6 +208,8 @@ The `python app.py` command starts a debug development server.
 app.py                    exported Flask app and development server entry point
 backend/
   __init__.py             create_app, CORS, logging, and route registration
+  auth.py                 Google ID-token verification and request-local identity guard
+  auth_routes.py          protected POST /auth/verify identity probe
   routes.py               HTTP handlers, JSON serialization, last-result storage
   validation.py           request parsing and validation errors
   models.py               Driver, Passenger, and coordinate type
@@ -215,6 +218,8 @@ tests/
   __init__.py             test package marker
   test_api.py             root-app HTTP contract, storage, and validation tests
   test_optimizer.py       domain and optimizer invariant tests
+  test_auth.py            synthetic crypto, auth, certificate-cache and CORS checks
+  run_tests.py            dotenv-safe synthetic-config test discovery
 public/                   static assets and HTML shell
 src/                      React frontend source
 requirements.txt          Python runtime dependencies
@@ -223,3 +228,28 @@ package.json              Node dependencies and npm scripts
 .vercelignore             frontend-only deployment exclusions
 .gitignore
 ```
+
+## Google account identity
+
+The probe accepts no body or query inputs. Controlled errors contain string `error`
+and stable `code`: `AUTH_REQUIRED` or `INVALID_CREDENTIAL` (401),
+`INVALID_AUTH_REQUEST` (400), and `AUTH_UNAVAILABLE` (503). Auth responses use
+`Cache-Control: no-store`; 401 includes `WWW-Authenticate: Bearer`. Public Google
+certificates follow HTTP cache freshness and outbound requests have a three-second
+transport timeout. Verification infrastructure failure never trusts decoded claims.
+
+Configure `CORS_ALLOWED_ORIGINS` with exact comma-separated frontend origins.
+The development default is `http://localhost:3000`; add the exact local port if
+changed. Wildcards, origin patterns and URL paths are rejected. Bearer requests omit
+cookies; public OPTIONS preflight permits Authorization/Content-Type for allowed
+origins. CORS is a browser boundary and never replaces proof verification.
+
+Deployment still requires a separate HTTPS Flask host, Authorization forwarding,
+OPTIONS handling, outbound Google certificate access, exact Google Authorized
+JavaScript origins, compatible GIS/CSP/popup headers and safe server/proxy logging.
+Do not log Authorization, proof, full claims or account data. No backend host or
+real-account/deployed-origin validation is configured by this change.
+
+Route planning remains public. The legacy process-global last-result GET and route
+coordinate logging require migration in the future private saved-trip API slice.
+Authentication alone does not establish saved-route durability or privacy.

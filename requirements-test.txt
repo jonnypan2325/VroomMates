@@ -1,0 +1,3 @@
+-r requirements.txt
+# Synthetic RSA key/signature fixtures only; no live accounts or credentials.
+cryptography==50.0.2

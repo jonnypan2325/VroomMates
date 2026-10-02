@@ -1,3 +1,6 @@
 Flask==3.0.3
 Flask-Cors==4.0.1
 python-dotenv==1.0.1
+google-auth[requests]==2.59.1
+requests==2.34.2
+CacheControl==0.14.4
