@@ -1,0 +1,7 @@
+.google-account { margin-bottom: 20px; }
+.google-signin { max-width: 100%; }
+.google-account .google-retry-actions { margin-top: 16px; }
+.google-account .account-note { margin: 8px 0 0; font-size: 0.75rem; line-height: 1.5; }
+.google-account .account-error { margin: 10px 0 0; padding: 10px 12px; color: var(--danger); background: var(--danger-bg); border: 1px solid var(--danger-border); border-radius: var(--radius); font-size: 0.85rem; line-height: 1.5; }
+.google-account .google-btn { min-height: 44px; }
+.google-account .google-btn:focus-visible { outline: 2px solid var(--accent-dark); outline-offset: 3px; }

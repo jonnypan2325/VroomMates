@@ -121,7 +121,7 @@ UI will load but route optimization requests will fail.
 4. If prompted, configure the OAuth consent screen first (External, just fill in the required fields).
 5. Choose **Web application** as the application type.
 6. Under **Authorized JavaScript origins**, add `http://localhost:3000`.
-7. Under **Authorized redirect URIs**, also add `http://localhost:3000`.
+7. The popup callback sign-in flow does not require a redirect URI; do not add the API probe as a Google redirect URI.
 8. Copy the generated **Client ID** and paste it into `.env` as
    `REACT_APP_GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_ID`. The frontend and server must use the same web client ID. Missing `GOOGLE_CLIENT_ID` fails backend startup.
 
@@ -188,9 +188,7 @@ CI=true npm test -- --watchAll=false
 npm run build
 ```
 
-There are currently no authored frontend tests. Jest reports “No tests found”
-and exits with code 1. To check that the runner works despite that absence, run
-`CI=true npm test -- --watchAll=false --passWithNoTests`.
+The synthetic auth lifecycle and rendered hook/component tests cover server verification, retries, logout, expiry, retained Google callbacks and account-switch races. They do not use real Google accounts or credentials.
 In PowerShell, set `$env:CI = "true"` before running the npm test command.
 
 ## Deployment
@@ -230,6 +228,20 @@ package.json              Node dependencies and npm scripts
 ```
 
 ## Google account identity
+
+The Google-rendered sign-in button supplies a signed ID token. VroomMates sends it
+as explicit `Authorization: Bearer` proof to `POST /auth/verify`, with an empty body
+and browser credentials omitted. Flask verifies the signature, configured audience,
+Google issuer, issue time, expiry and required claims on every protected request.
+Its request-local owner is `(google, verified sub)`, exposed as `google:<sub>`.
+Names are optional display data; emails and client-supplied owner fields grant no authority.
+
+The browser keeps the proof only in memory. Refreshing, opening a new tab or expiry
+requires explicit sign-in again. Logout clears this tab and cancels pending requests;
+it does not sign out Google or revoke a copied valid token, which remains usable
+until signed expiry. Switching accounts requires logging out first. Stale callbacks
+and responses cannot restore the previous account. A temporary verification outage
+offers explicit retry without showing an authenticated greeting.
 
 The probe accepts no body or query inputs. Controlled errors contain string `error`
 and stable `code`: `AUTH_REQUIRED` or `INVALID_CREDENTIAL` (401),

@@ -1,43 +1,24 @@
-import { useEffect, useState } from 'react';
-import { googleLogout, useGoogleLogin } from '@react-oauth/google';
-import axios from 'axios';
+import { useEffect, useState, useSyncExternalStore } from 'react';
+import { googleLogout } from '@react-oauth/google';
+import GoogleIdentitySession from '../auth/GoogleIdentitySession';
 
-const USERINFO_URL = 'https://www.googleapis.com/oauth2/v1/userinfo';
-
-/** Handles Google sign-in and exposes the signed-in user's profile. */
+/** Only a verified server response makes this tab authenticated. */
 export default function useGoogleProfile() {
-  const [session, setSession] = useState(null);
-  const [profile, setProfile] = useState(null);
-
-  const login = useGoogleLogin({
-    onSuccess: setSession,
-    onError: (error) => console.error('Google login failed:', error),
-  });
-
-  useEffect(() => {
-    if (!session) return undefined;
-
-    let cancelled = false;
-    axios
-      // The Bearer header authenticates on its own; keep the token out of the URL.
-      .get(USERINFO_URL, {
-        headers: { Authorization: `Bearer ${session.access_token}`, Accept: 'application/json' },
-      })
-      .then((response) => {
-        if (!cancelled) setProfile(response.data);
-      })
-      .catch((error) => console.error('Could not load Google profile:', error));
-
-    return () => {
-      cancelled = true;
-    };
-  }, [session]);
-
-  const logOut = () => {
-    googleLogout();
-    setSession(null);
-    setProfile(null);
+  const [session] = useState(() => new GoogleIdentitySession({
+    apiUrl: process.env.REACT_APP_FLASK_API_URL || 'http://127.0.0.1:5000',
+    onLogout: googleLogout,
+  }));
+  const state = useSyncExternalStore(session.subscribe, session.getSnapshot);
+  useEffect(() => () => session.clear(), [session]);
+  // GoogleLogin must be remounted on generation changes; its callback refs otherwise drift.
+  const generation = state.generation;
+  return {
+    ...state,
+    onGoogleSuccess: (response) => session.acceptGoogle(response, generation),
+    onGoogleError: () => session.rejectGoogle(generation),
+    logOut: session.logout,
+    cancel: session.logout,
+    retry: session.retry,
+    protectedRequest: session.request,
   };
-
-  return { profile, login, logOut };
 }

@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import './App.css';
 import LocationInput from './LocationInput';
+import GoogleAccount from './components/GoogleAccount';
 import useMediaQuery, { MOBILE_QUERY } from './hooks/useMediaQuery';
 import useGoogleMap from './hooks/useGoogleMap';
 import useGoogleProfile from './hooks/useGoogleProfile';
@@ -13,7 +14,7 @@ function App() {
 
   const isStacked = useMediaQuery(MOBILE_QUERY);
   const { map, directionsRenderer } = useGoogleMap(MAP_CONTAINER_ID);
-  const { profile, login, logOut } = useGoogleProfile();
+  const auth = useGoogleProfile();
   const { containerRef, panelStyle, startResizing } = useResizablePanels(isStacked);
 
   // panelStyle publishes both sizes as CSS variables; each layout's stylesheet
@@ -27,18 +28,7 @@ function App() {
             Enter locations for drivers, passengers, and destination:
           </p>
 
-          {profile ? (
-            <div className="account-row">
-              <p className="account-greeting">Hello, {profile.given_name}</p>
-              <button className="google-btn google-logout-btn" onClick={logOut}>
-                Log out
-              </button>
-            </div>
-          ) : (
-            <button className="google-btn" onClick={() => login()}>
-              Sign in with Google
-            </button>
-          )}
+          <GoogleAccount auth={auth} />
 
           <LocationInput
             map={map}
