@@ -4,7 +4,6 @@ import unittest
 from unittest.mock import patch
 
 import app as root_app
-from backend.routes import optimized_routes_store
 from backend.validation import ValidationError, parse_route_request
 
 
@@ -47,11 +46,9 @@ class ValidationTests(unittest.TestCase):
 
 class ApiContractTests(unittest.TestCase):
     def setUp(self):
-        optimized_routes_store.clear()
         previous_testing = root_app.app.config["TESTING"]
         root_app.app.config["TESTING"] = True
         self.addCleanup(root_app.app.config.update, TESTING=previous_testing)
-        self.addCleanup(optimized_routes_store.clear)
         self.client = root_app.app.test_client()
 
     def assert_error(self, response, message, status=400):
@@ -59,14 +56,16 @@ class ApiContractTests(unittest.TestCase):
         self.assertTrue(response.is_json)
         self.assertEqual(response.get_json(), {"error": message})
 
-    def test_get_before_success(self):
-        self.assert_error(
-            self.client.get("/routeoptimizer/"),
-            "No routes available. Submit data first using POST.",
-            status=404,
-        )
+    def assert_retired(self, response):
+        self.assertEqual(response.status_code, 410)
+        self.assertEqual(response.get_json()['code'], 'LAST_RESULT_REMOVED')
+        self.assertEqual(response.headers['Cache-Control'], 'no-store')
+        self.assertNotIn('optimizedRoutes', response.get_json())
 
-    def test_success_routes_and_last_result(self):
+    def test_get_before_success(self):
+        self.assert_retired(self.client.get('/routeoptimizer/'))
+
+    def test_success_routes_without_shared_retrieval(self):
         payload = valid_payload()
         response = self.client.post("/routeoptimizer/", json=payload)
         self.assertEqual(response.status_code, 200)
@@ -84,10 +83,9 @@ class ApiContractTests(unittest.TestCase):
         self.assertCountEqual(pickups, payload["passengers"])
         self.assertEqual(sum(len(route) == 2 for route in routes), 1)
         stored = self.client.get("/routeoptimizer/")
-        self.assertEqual(stored.status_code, 200)
-        self.assertEqual(stored.get_json(), result)
+        self.assert_retired(stored)
 
-    def test_failed_post_preserves_last_success(self):
+    def test_failed_post_does_not_expose_prior_success(self):
         success = self.client.post("/routeoptimizer/", json=valid_payload())
         self.assertEqual(success.status_code, 200)
         self.assert_error(
@@ -95,10 +93,9 @@ class ApiContractTests(unittest.TestCase):
             "drivers must be a non-empty list",
         )
         stored = self.client.get("/routeoptimizer/")
-        self.assertEqual(stored.status_code, 200)
-        self.assertEqual(stored.get_json(), success.get_json())
+        self.assert_retired(stored)
 
-    def test_later_success_replaces_last_result(self):
+    def test_later_success_is_returned_only_to_its_caller(self):
         first = self.client.post("/routeoptimizer/", json=valid_payload())
         self.assertEqual(first.status_code, 200)
         payload = valid_payload()
@@ -107,18 +104,22 @@ class ApiContractTests(unittest.TestCase):
         self.assertEqual(second.status_code, 200)
         self.assertNotEqual(first.get_json(), second.get_json())
         stored = self.client.get("/routeoptimizer/")
-        self.assertEqual(stored.status_code, 200)
-        self.assertEqual(stored.get_json(), second.get_json())
+        self.assert_retired(stored)
 
-    def test_unexpected_optimizer_failure_preserves_last_success(self):
+    def test_unexpected_optimizer_failure_does_not_expose_prior_success(self):
         success = self.client.post("/routeoptimizer/", json=valid_payload())
         self.assertEqual(success.status_code, 200)
         with patch("backend.routes.give_paths", side_effect=RuntimeError("optimizer failed")):
             with self.assertRaisesRegex(RuntimeError, "optimizer failed"):
                 self.client.post("/routeoptimizer/", json=valid_payload())
         stored = self.client.get("/routeoptimizer/")
-        self.assertEqual(stored.status_code, 200)
-        self.assertEqual(stored.get_json(), success.get_json())
+        self.assert_retired(stored)
+
+    def test_post_does_not_log_coordinates(self):
+        with patch.object(root_app.app.logger, 'info') as log:
+            response = self.client.post('/routeoptimizer/', json=valid_payload())
+        self.assertEqual(response.status_code, 200)
+        log.assert_not_called()
 
     def test_co_located_passengers(self):
         payload = valid_payload()
