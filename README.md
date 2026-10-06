@@ -189,7 +189,7 @@ CI=true npm test -- --watchAll=false
 npm run build
 ```
 
-The synthetic auth lifecycle and rendered hook/component tests cover server verification, retries, logout, expiry, retained Google callbacks and account-switch races. They do not use real Google accounts or credentials.
+Auth lifecycle tests are pending human visual confirmation; they have not been written or run yet.
 In PowerShell, set `$env:CI = "true"` before running the npm test command.
 
 ## Deployment
@@ -266,3 +266,34 @@ real-account/deployed-origin validation is configured by this change.
 Route planning remains public. The legacy process-global last-result GET and route
 coordinate logging require migration in the future private saved-trip API slice.
 Authentication alone does not establish saved-route durability or privacy.
+
+
+### Private saved-data API (local implementation)
+
+The saved-trip and saved-location APIs use Firestore through Flask. The target is Vercel-hosted Flask with Firestore in the existing Google project; infrastructure is not provisioned by these changes. The current Vercel deployment still excludes Flask. Deployment packaging, database/region/IAM, exact hosted origins and real two-account/device recovery need a separate delivery check.
+
+Send the Google ID token in `Authorization: Bearer ...` for each protected request. Flask verifies it and derives ownership from Google subject, then selects the account's isolated Firestore document namespace. Browser clients do not connect directly to Firestore; no Firebase Authentication migration is needed. `FIRESTORE_PROJECT_ID` and optional `FIRESTORE_DATABASE_ID` are server-only settings. The SDK uses server Application Default Credentials; no database credential belongs in a `REACT_APP_` variable. Prefer Vercel OIDC / Google Workload Identity Federation for deployment; the Python refresh integration and project/environment IAM restrictions still need implementation and hosted verification. Never place actual credential values in this repo or its CDK record.
+
+- `POST /saved-trips`: `{id: UUIDv4, title, snapshot: {schema_version: 1, inputs: {drivers, passengers, destination}, routes}}`. Each input point has a unique `stop_id`, optional independent user label and `{kind: "google_places", place_id}` source; drivers also have positive integer capacity. A route is `{driver_id, stop_ids: [driver, ...passengers, destination]}`. Ordered occurrence references preserve repeated pickup places. Addresses, coordinates and provider responses are rejected. Saved assignments are preserved; reopening resolves current place details and does not automatically optimize again.
+- `GET /saved-trips`: owner summaries, default50/max100 with opaque `cursor`; `GET /saved-trips/<id>` loads references; `DELETE` returns204 including already missing/foreign IDs.
+- `POST /saved-locations`: `{id: UUIDv4, label, source: {kind: "google_places", place_id}}`; `GET /saved-locations` lists at most100 owner locations, detail byID, `DELETE` removes one. Labels are normalized/case-insensitively unique per owner; different labels can refer to the same place. The response has `resolution_required: true`, with no retained address/geometry. No manual-coordinate or edit API in v1.
+
+Generate one random ID per save intent. A matching existing ID/content returns the original record; different content conflicts. A new ID can intentionally copy a trip. After a timeout the save outcome is unknown: load that ID to reconcile before an explicit retry. Never automatically replay writes under a new account or after deletion; there is no permanent operation ledger or post-delete replay guarantee. Store failures return503 rather than fabricated empty results or successful writes.
+
+The former public `GET /routeoptimizer/` is retired with410 `LAST_RESULT_REMOVED`; route POST still returns its existing success shape. No global last-result object or full coordinate logging remains.
+
+`firestore.indexes.json` declares a collection-group exemption for `trips.snapshot_json`. This configuration is **not deployed** by these changes; without applying it, Firestore's default indexing still applies. Review it alongside any existing project indexes; do not overwrite unrelated configuration. The snapshot is encoded as bounded canonical JSON, with separate projected list metadata. Server IAM and Flask ownership checks protect server SDK access; client rules alone do not constrain the server SDK. Deny browser access to the dedicated `vroommates_accounts` namespace when configuring rules without changing unrelated project access.
+
+Local integration tests explicitly opt into the loopback Firestore emulator with anonymous credentials and a demo project. They cannot establish hosted durability or pricing/backup retention. Run the safe backend runner, which disables dotenv before discovery:
+
+```bash
+python -B -m tests.run_tests
+```
+
+For the selected-adapter suite, start an official Firestore emulator bound to `127.0.0.1:8187` with project `demo-vroommates`, then run:
+
+```bash
+FIRESTORE_EMULATOR_HOST=127.0.0.1:8187 VROOMMATES_TEST_FIRESTORE_EMULATOR=127.0.0.1:8187 python -B -m tests.run_tests
+```
+
+The explicit test flag rejects cloud/nonloopback targets. The emulator service itself is ephemeral; the restart test creates a fresh backend process against the same running emulator. Hosted managed-Firestore recovery and two-device proof remain delivery work. Save/My Trips and saved-place picker interfaces are later slices; the API does not yet make those flows available in the browser.

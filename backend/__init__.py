@@ -12,6 +12,7 @@ from .auth_routes import register_auth_routes
 from .routes import register_routes
 from .saved_store import FirestoreSavedStore
 from .saved_trips import register_saved_trip_routes
+from .saved_locations import register_saved_location_routes
 from .auth import auth_error
 from flask import request
 from werkzeug.exceptions import HTTPException
@@ -76,6 +77,7 @@ def create_app(config=None):
         store = FirestoreSavedStore(project=app.config['FIRESTORE_PROJECT_ID'], database=app.config['FIRESTORE_DATABASE_ID'])
     app.extensions['saved_data_store'] = store
     register_saved_trip_routes(app, store)
+    register_saved_location_routes(app, store)
 
     @app.after_request
     def private_no_store(response):
