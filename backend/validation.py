@@ -1,4 +1,13 @@
+import math
+
 from .models import Driver, Passenger
+from .optimizer import MAX_DRIVERS, MAX_PASSENGERS
+
+
+def _geographic(lat, lng, label):
+    if not (math.isfinite(lat) and math.isfinite(lng)
+            and -90 <= lat <= 90 and -180 <= lng <= 180):
+        raise ValidationError(f'{label} lat/lng must be finite geographic coordinates')
 
 
 class ValidationError(ValueError):
@@ -18,13 +27,21 @@ def parse_route_request(data):
         raise ValidationError('drivers must be a non-empty list')
     if not isinstance(passenger_location, list) or len(passenger_location) == 0:
         raise ValidationError('passengers must be a non-empty list')
+    if len(driver_location) > MAX_DRIVERS:
+        raise ValidationError(f'total_distance supports at most {MAX_DRIVERS} drivers')
+    if len(passenger_location) > MAX_PASSENGERS:
+        raise ValidationError(f'total_distance supports at most {MAX_PASSENGERS} passengers')
     if not isinstance(destination, dict) or 'lat' not in destination or 'lng' not in destination:
         raise ValidationError('destination must include lat and lng')
     try:
         dest_lat = float(destination['lat'])
         dest_lng = float(destination['lng'])
+    except OverflowError:
+        raise ValidationError('destination lat/lng must be finite geographic coordinates')
     except (TypeError, ValueError):
         raise ValidationError('destination lat/lng must be numbers')
+
+    _geographic(dest_lat, dest_lng, 'destination')
 
     drivers = []
     total_capacity = 0
@@ -37,8 +54,11 @@ def parse_route_request(data):
         try:
             lat = float(location['lat'])
             lng = float(location['lng'])
+        except OverflowError:
+            raise ValidationError(f'driver[{i}] location lat/lng must be finite geographic coordinates')
         except (TypeError, ValueError):
             raise ValidationError(f'driver[{i}] location must be numbers')
+        _geographic(lat, lng, f'driver[{i}] location')
         capacity = driver.get('capacity')
         if not isinstance(capacity, int) or isinstance(capacity, bool) or capacity <= 0:
             raise ValidationError(f'driver[{i}].capacity must be a positive integer')
@@ -54,8 +74,11 @@ def parse_route_request(data):
         try:
             lat = float(passenger['lat'])
             lng = float(passenger['lng'])
+        except OverflowError:
+            raise ValidationError(f'passenger[{i}] lat/lng must be finite geographic coordinates')
         except (TypeError, ValueError):
             raise ValidationError(f'passenger[{i}] lat/lng must be numbers')
+        _geographic(lat, lng, f'passenger[{i}]')
         passengers.append(Passenger(lng, lat, i))
 
     if total_capacity < len(passengers):

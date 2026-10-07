@@ -1,131 +1,187 @@
-"""Pure distance, assignment, and waypoint-ordering logic (no Flask state)."""
+"""Bounded, exact geographic total-distance optimization (no Flask state).
+
+Every listed driver travels. Minimizing complete route lengths therefore also
+minimizes added distance, since the sum of their direct trips is constant.
+Costs use ordinary floating-point arithmetic; strict recurrence comparisons
+resolve equal costs by identity, without promising global rounded-cost ties.
+"""
 
 import math
-import heapq
-from itertools import count
+
+MAX_PASSENGERS = 12
+MAX_DRIVERS = 8
 
 
 def haversine_distance(coord1, coord2, R=3959):
-    """Return the great-circle distance in miles for (longitude, latitude) coordinates.
-
-    R is the Earth radius in miles.
-    """
+    """Great-circle miles for (longitude, latitude), with roundoff clamping."""
     lng1, lat1 = coord1
     lng2, lat2 = coord2
-    lat1_r = math.radians(lat1)
-    lat2_r = math.radians(lat2)
-    dlat = lat2_r - lat1_r
-    dlon = math.radians(lng2 - lng1)
-    a = math.sin(dlat / 2) ** 2 + math.cos(lat1_r) * math.cos(lat2_r) * math.sin(dlon / 2) ** 2
-    return 2 * R * math.asin(math.sqrt(a))
+    lat1_r, lat2_r = math.radians(lat1), math.radians(lat2)
+    dlat, dlon = lat2_r - lat1_r, math.radians(lng2 - lng1)
+    a = (math.sin(dlat / 2) ** 2
+         + math.cos(lat1_r) * math.cos(lat2_r) * math.sin(dlon / 2) ** 2)
+    a = min(1.0, max(0.0, a))
+    # atan2 avoids the extra asin conditioning loss near antipodal endpoints.
+    return 2 * R * math.atan2(math.sqrt(a), math.sqrt(1.0 - a))
+
+
+def _suffix_table(pickups, destination):
+    """F[mask][j]: cheapest j-first suffix ending at the shared destination.
+
+    Each raw identity has a bit, including passengers at equal coordinates.
+    Paths contain ascending-ID indexes, so tuple ties are identity ties.
+    """
+    n, size = len(pickups), 1 << len(pickups)
+    between = [[haversine_distance(a, b) for b in pickups] for a in pickups]
+    to_dest = [haversine_distance(p, destination) for p in pickups]
+    suffix = [None] * size
+    members = [()] * size
+    for mask in range(1, size):
+        js = tuple(j for j in range(n) if mask & (1 << j))
+        members[mask] = js
+        row = [None] * n
+        for j in js:
+            rest = mask ^ (1 << j)
+            if not rest:
+                row[j] = (to_dest[j], (j,))
+            else:
+                row[j] = min((between[j][k] + suffix[rest][k][0],
+                              (j,) + suffix[rest][k][1])
+                             for k in members[rest])
+        suffix[mask] = row
+    return suffix, members
+
+
+def _route_table(origin, pickups, destination, capacity, suffix, members):
+    table = [None] * len(suffix)
+    table[0] = (haversine_distance(origin, destination), ())
+    first_legs = [haversine_distance(origin, p) for p in pickups]
+    for mask in range(1, len(table)):
+        if len(members[mask]) <= capacity:
+            table[mask] = min((first_legs[j] + suffix[mask][j][0],
+                               suffix[mask][j][1]) for j in members[mask])
+    return table
+
+
+def _solve(drivers, passengers, destination):
+    """Return ID-ordered drivers/passengers and their optimal pickup index paths.
+
+    Solve before any mutation. Suffix DP considers every next pickup; partition
+    DP considers every capacity-feasible subset for each driver prefix.
+    Tables use O(P*2**P + D*2**P) states and O(D*3**P) partition work.
+    """
+    if len(drivers) > MAX_DRIVERS:
+        raise ValueError(f'total_distance supports at most {MAX_DRIVERS} drivers')
+    if len(passengers) > MAX_PASSENGERS:
+        raise ValueError(f'total_distance supports at most {MAX_PASSENGERS} passengers')
+    ds = sorted(drivers, key=lambda d: d.get_driver_num())
+    ps = sorted(passengers, key=lambda p: p.get_passenger_num())
+    if sum(d.get_capacity() for d in ds) < len(ps):
+        raise ValueError('insufficient total driver capacity')
+    pickups = [p.get_coords() for p in ps]
+    suffix, members = _suffix_table(pickups, destination)
+    size = len(suffix)
+    routes = [_route_table(d.get_coords(), pickups, destination,
+                           d.get_capacity(), suffix, members) for d in ds]
+    # Positional assignment signature compares passenger-to-driver ranks in ID
+    # order. Ranks have the same ordering as driver IDs, even for sparse IDs.
+    base = len(ds) + 1
+    weights = [base ** (len(ps) - j - 1) for j in range(len(ps))]
+    mask_weight = [0] * size
+    for mask in range(1, size):
+        bit = mask & -mask
+        mask_weight[mask] = mask_weight[mask ^ bit] + weights[bit.bit_length() - 1]
+    previous = [None] * size
+    previous[0] = (0.0, 0)
+    parents = []
+    for i, table in enumerate(routes):
+        current, parent = [None] * size, [None] * size
+        for mask in range(size):
+            sub = mask
+            best = None
+            while True:
+                old, route = previous[mask ^ sub], table[sub]
+                if old is not None and route is not None:
+                    candidate = (old[0] + route[0], old[1] + i * mask_weight[sub])
+                    if best is None or candidate < best:
+                        best, parent[mask] = candidate, sub
+                if not sub:
+                    break
+                sub = (sub - 1) & mask
+            current[mask] = best
+        previous = current
+        parents.append(parent)
+    mask = size - 1
+    if previous[mask] is None:
+        raise ValueError('insufficient total driver capacity')
+    paths = [None] * len(ds)
+    for i in reversed(range(len(ds))):
+        sub = parents[i][mask]
+        if sub is None:
+            raise RuntimeError('invalid optimizer reconstruction')
+        paths[i] = routes[i][sub][1]
+        mask ^= sub
+    if mask:
+        raise RuntimeError('incomplete optimizer reconstruction')
+    return ds, ps, paths
 
 
 def order_stops(driver, destination):
-    """Preserve the existing search cost, which includes destination distance at each pickup.
+    """Shortest complete single-driver route, retaining both endpoints.
 
-    This cost does not represent the total route distance.
+    Preserve F03's linear all-colocated shortcut even beyond the general bound.
+    Unsupported larger mixed groups fail explicitly instead of expanding search.
     """
-    if not driver.passengers:
-        return [driver.get_coords(), destination]
-    # Equal-cost states can contain Passenger objects, which Python cannot order.
-    sequence = count()
-    open_list = [(0, next(sequence), (driver.get_coords(), tuple(driver.passengers), []))]
-
-    visited = set()
-
-    while(open_list):
-        cost, _, (current_position, remaining_passengers, path_taken) = heapq.heappop(open_list)
-
-        if (current_position, remaining_passengers) in visited:
-            continue
-
-        visited.add((current_position, remaining_passengers))
-
-        if not remaining_passengers and current_position == destination:
-            return [driver.get_coords()] + path_taken
-
-        expanded_pickups = set()
-        for i, passenger in enumerate(remaining_passengers):
-            # Equal pickup coordinates have identical costs and successor choices.
-            # Remove one occurrence per step so every passenger retains a pickup.
-            pickup = passenger.get_coords()
-            if pickup in expanded_pickups:
-                continue
-            expanded_pickups.add(pickup)
-            new_cost = cost + haversine_distance(current_position, passenger.get_coords()) + haversine_distance(passenger.get_coords(), destination)
-            new_remaining_passengers = remaining_passengers[:i] + remaining_passengers[i+1:]
-            new_path = path_taken + [passenger.get_coords()]
-            if (passenger.get_coords(), new_remaining_passengers) not in visited:
-                heapq.heappush(open_list, (new_cost, next(sequence), (passenger.get_coords(),new_remaining_passengers,new_path)))
-
-        if not remaining_passengers:
-            heapq.heappush(open_list, (cost+haversine_distance(current_position, destination), next(sequence), (destination, remaining_passengers, path_taken+[destination])))
+    passengers = driver.get_passengers()
+    origin = driver.get_coords()
+    if not passengers:
+        return [origin, destination]
+    pickups = [p.get_coords() for p in passengers]
+    if all(p == pickups[0] for p in pickups):
+        return [origin] + pickups + [destination]
+    if len(pickups) > MAX_PASSENGERS:
+        raise ValueError(f'total_distance supports at most {MAX_PASSENGERS} passengers')
+    pickups = [p.get_coords() for p in sorted(passengers, key=lambda p: p.get_passenger_num())]
+    suffix, members = _suffix_table(pickups, destination)
+    table = _route_table(origin, pickups, destination, len(pickups), suffix, members)
+    return [origin] + [pickups[j] for j in table[-1][1]] + [destination]
 
 
 def distance_from_line(passenger, driver, destination):
-    """Return the added distance in miles for a pickup before the destination.
+    """Single-pickup detour retained as a public compatibility helper."""
+    return (haversine_distance(driver.get_coords(), passenger.get_coords())
+            + haversine_distance(passenger.get_coords(), destination)
+            - haversine_distance(driver.get_coords(), destination))
 
-    Assignment uses this pairwise cost rather than the cost of the complete route.
-    """
-    driver_to_passenger = haversine_distance(driver.get_coords(), passenger.get_coords())
-    passenger_to_dest = haversine_distance(passenger.get_coords(), destination)
-    driver_to_dest = haversine_distance(driver.get_coords(), destination)
-    return (driver_to_passenger + passenger_to_dest) - driver_to_dest
+
+def _apply(ds, ps, paths):
+    for driver, path in zip(ds, paths):
+        for j in path:
+            driver.add_passenger(ps[j])
 
 
 def assign_drivers(drivers, passengers, destination):
-    """Use global-greedy assignment over pairwise detour costs.
+    """Append optimal fresh-request groups and decrement remaining capacities.
 
-    This function mutates driver passenger lists and remaining capacities.
-    Reusing the same objects can assign a passenger again.
+    Historical repeated calls still append/decrement; optimality is guaranteed
+    for fresh validated objects, not preassigned/reused driver groups.
     """
     if not drivers or not passengers:
         return drivers
-
-    candidates = []
-    for passenger in passengers:
-        for driver in drivers:
-            cost = distance_from_line(passenger, driver, destination)
-            candidates.append((
-                cost,
-                passenger.get_passenger_num(),
-                driver.get_driver_num(),
-            ))
-    # Passenger IDs precede driver IDs to preserve deterministic assignment ties.
-    candidates.sort()
-
-    driver_by_num = {d.get_driver_num(): d for d in drivers}
-    passenger_by_num = {p.get_passenger_num(): p for p in passengers}
-    assigned = set()
-
-    for _cost, pnum, dnum in candidates:
-        if pnum in assigned:
-            continue
-        driver = driver_by_num[dnum]
-        if driver.get_capacity() > 0:
-            driver.add_passenger(passenger_by_num[pnum])
-            assigned.add(pnum)
-            if len(assigned) == len(passengers):
-                break
+    ds, ps, paths = _solve(drivers, passengers, destination)
+    _apply(ds, ps, paths)
     return drivers
 
 
 def give_paths(drivers, passengers, destination):
-    """Return routes in driver input order because the frontend selects drivers by index.
-
-    Each listed driver travels to the destination, even without passengers.
-    Route coordinates use (longitude, latitude).
-    """
-    drivers = assign_drivers(drivers, passengers, destination)
-    paths = []
-    for d in drivers:
-        if not d.get_passengers():
-            paths.append([d.get_coords(), destination])
-            continue
-        path = d.get_path(destination)
-        if not path:
-            # Preserve a route with endpoints if the search returns no path.
-            # This fallback omits assigned pickups.
-            path = [d.get_coords(), destination]
-        paths.append(path)
-    return paths
+    """Solve once, mutate once, and emit routes in original driver input order."""
+    if not passengers:
+        return [d.get_path(destination) for d in drivers]
+    ds, ps, paths = _solve(drivers, passengers, destination)
+    preassigned = any(d.get_passengers() for d in ds)
+    _apply(ds, ps, paths)
+    if preassigned:
+        return [d.get_path(destination) for d in drivers]
+    by_driver = {id(d): [d.get_coords()] + [ps[j].get_coords() for j in path]
+                 + [destination] for d, path in zip(ds, paths)}
+    return [by_driver[id(d)] for d in drivers]

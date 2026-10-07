@@ -249,6 +249,71 @@ class ApiContractTests(unittest.TestCase):
                 payload[field] = value
                 self.assert_error(self.client.post("/routeoptimizer/", json=payload), error)
 
+    def test_raw_limits_reject_before_solver_without_shared_retrieval(self):
+        success = self.client.post('/routeoptimizer/', json=valid_payload())
+        cases = [
+            (9, 1, 'total_distance supports at most 8 drivers'),
+            (1, 13, 'total_distance supports at most 12 passengers'),
+            (1, 18, 'total_distance supports at most 12 passengers'),
+            (9, 13, 'total_distance supports at most 8 drivers'),
+        ]
+        for d, p, error in cases:
+            payload = valid_payload()
+            payload['drivers'] = [payload['drivers'][0]] * d
+            payload['passengers'] = [payload['passengers'][0]] * p
+            payload['destination'] = None  # Declared oversized precedence.
+            with self.subTest(drivers=d, passengers=p):
+                with patch('backend.routes.give_paths') as solve:
+                    self.assert_error(self.client.post('/routeoptimizer/', json=payload), error)
+                solve.assert_not_called()
+                self.assert_retired(self.client.get('/routeoptimizer/'))
+
+    def test_full_boundary_raw_identities_accepted_and_deterministic(self):
+        payload = valid_payload()
+        payload['drivers'] = [{'location': {'lat': 0, 'lng': i}, 'capacity': 12}
+                              for i in range(8)]
+        payload['passengers'] = [{'lat': 0, 'lng': 0}] * 12
+        payload['destination'] = {'lat': 0, 'lng': 0}
+        responses = [self.client.post('/routeoptimizer/', json=payload) for _ in range(2)]
+        self.assertEqual([r.status_code for r in responses], [200, 200])
+        self.assertEqual(responses[0].get_json(), responses[1].get_json())
+        routes = responses[0].get_json()['optimizedRoutes']
+        self.assertEqual(len(routes), 8)
+        self.assertEqual(sum(len(r) - 2 for r in routes), 12)
+        for driver, route in zip(payload['drivers'], routes):
+            self.assertEqual(route[0], driver['location'])
+            self.assertEqual(route[-1], payload['destination'])
+        self.assert_retired(self.client.get('/routeoptimizer/'))
+
+    def test_finite_geographic_policy_all_coordinate_fields(self):
+        success = self.client.post('/routeoptimizer/', json=valid_payload())
+        for field, label in [('destination', 'destination'),
+                             ('driver', 'driver[0] location'), ('passenger', 'passenger[0]')]:
+            for axis, value in [('lat', float('nan')), ('lat', float('inf')),
+                                ('lng', float('-inf')), ('lat', 90.01), ('lat', -90.01),
+                                ('lng', 180.01), ('lng', -180.01), ('lat', 'NaN'),
+                                ('lat', 10 ** 400)]:
+                payload = valid_payload()
+                location = (payload['destination'] if field == 'destination' else
+                            payload['drivers'][0]['location'] if field == 'driver' else
+                            payload['passengers'][0])
+                location[axis] = value
+                with self.subTest(field=field, axis=axis, value=value):
+                    with patch('backend.routes.give_paths') as solve:
+                        self.assert_error(self.client.post('/routeoptimizer/', json=payload),
+                                          f'{label} lat/lng must be finite geographic coordinates')
+                    solve.assert_not_called()
+                    self.assert_retired(self.client.get('/routeoptimizer/'))
+
+    def test_geographic_boundaries_and_numeric_strings_accepted(self):
+        payload = valid_payload()
+        payload['destination'] = {'lat': '90', 'lng': '180'}
+        payload['drivers'][0]['location'] = {'lat': '-90', 'lng': '-180'}
+        payload['passengers'][0] = {'lat': '0', 'lng': '180'}
+        response = self.client.post('/routeoptimizer/', json=payload)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()['optimizedRoutes'][0][0], {'lat': -90, 'lng': -180})
+
     def test_missing_trailing_slash_redirects(self):
         for method in ("GET", "POST"):
             with self.subTest(method=method):
