@@ -267,6 +267,35 @@ Route planning remains public. The legacy process-global last-result GET and rou
 coordinate logging require migration in the future private saved-trip API slice.
 Authentication alone does not establish saved-route durability or privacy.
 
+## Bounded geographic optimizer
+
+The separately implemented exact geographic optimizer supports at most **12 raw
+passenger entries and 8 drivers**. Oversized HTTP requests return **400**, including
+18 co-located passenger entries; shared pickup coordinates do not reduce this limit.
+Coordinates must be finite and within latitude [-90, 90] and longitude [-180, 180];
+valid numeric strings remain accepted. Repeated passenger waypoints are preserved.
+Every listed driver travels, including a direct origin-to-destination route when no
+passengers are assigned. Each driver's origin, assigned pickup multiplicity and
+shared destination remain in the result, and the success JSON schema is unchanged.
+Compatibility for 18 co-located stops in the standalone `order_stops` helper does
+not widen the HTTP request limit.
+
+The objective is total geographic distance, with deterministic recurrence ties and
+ordinary floating-point accuracy. Correctness comparisons use a numerical tolerance;
+this does not promise bit-exact real-number costs, road travel times or other modes.
+
+After combining the optimizer and auth changes, reproduce the synthetic optimizer
+reference budget with the supported Python environment:
+
+```bash
+python scripts/benchmark_optimizer.py --repeats 5
+python scripts/benchmark_optimizer.py --memory
+```
+
+The first command times serial untraced solves; the second measures traced solver
+allocations separately. These local synthetic budgets do not establish deployed
+concurrency or real-user route acceptance.
+
 
 ### Private saved-data API (local implementation)
 
