@@ -3,7 +3,8 @@
 Every listed driver travels. Minimizing complete route lengths therefore also
 minimizes added distance, since the sum of their direct trips is constant.
 Costs use ordinary floating-point arithmetic; strict recurrence comparisons
-resolve equal costs by identity, without promising global rounded-cost ties.
+prefer fewer pickup/car pairs at equal costs, then identity, without promising
+global rounded-cost ties.
 """
 
 import math
@@ -91,8 +92,12 @@ def _solve(drivers, passengers, destination):
     for mask in range(1, size):
         bit = mask & -mask
         mask_weight[mask] = mask_weight[mask ^ bit] + weights[bit.bit_length() - 1]
+    # Count distinct pickup coordinates per car. Summing these counts measures
+    # splits without a weighted objective or any sacrifice in route distance.
+    pickup_visits = [len({pickups[j] for j in members[mask]})
+                     for mask in range(size)]
     previous = [None] * size
-    previous[0] = (0.0, 0)
+    previous[0] = (0.0, 0, 0)
     parents = []
     for i, table in enumerate(routes):
         current, parent = [None] * size, [None] * size
@@ -102,7 +107,8 @@ def _solve(drivers, passengers, destination):
             while True:
                 old, route = previous[mask ^ sub], table[sub]
                 if old is not None and route is not None:
-                    candidate = (old[0] + route[0], old[1] + i * mask_weight[sub])
+                    candidate = (old[0] + route[0], old[1] + pickup_visits[sub],
+                                 old[2] + i * mask_weight[sub])
                     if best is None or candidate < best:
                         best, parent[mask] = candidate, sub
                 if not sub:
