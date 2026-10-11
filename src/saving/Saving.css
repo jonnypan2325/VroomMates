@@ -1,0 +1,10 @@
+.address-field { flex: 1 1 auto; min-width: 0; width: 100%; }
+.address-input-wrap { position: relative; min-width: 0; }
+.address-input-wrap > input { display: block; margin: 0; width: 100%; height: 44px; box-sizing: border-box; }
+.address-input-wrap.has-saved-places > input { padding-right: 88px; }
+.address-saved-chooser { position: absolute; top: 1px; right: 1px; width: 80px; height: calc(100% - 2px); min-height: 0; border: 0; border-left: 1px solid var(--border); border-radius: 0 6px 6px 0; margin: 0; padding: 0 6px; background: #faf8fe; color: #624ca9; font-size: .78rem; }
+.address-input-wrap.has-address-action { display: flex; height: 44px; box-sizing: border-box; border: 1px solid var(--border); border-radius: var(--radius); background: #fff; }
+.address-input-wrap.has-address-action:focus-within { border-color: var(--accent); outline: 2px solid #d3c6ef; outline-offset: 1px; }
+.address-input-wrap.has-address-action > input { flex: 1 1 auto; min-width: 0; height: 42px; min-height: 0; border: 0; padding: 8px 10px; border-radius: var(--radius) 0 0 var(--radius); }
+.address-action { position: static; display: flex; flex: 0 0 auto; align-self: stretch; }
+.location-saving .address-action > button { margin: 0; min-height: 0; padding: 0 10px; font-size: .78rem; border: 0; border-left: 1px solid var(--border); border-radius: 0 5px 5px 0; height: 42px; width: auto; box-sizing: border-box; white-space: nowrap; }
