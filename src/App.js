@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React from 'react';
 import './App.css';
 import LocationInput from './LocationInput';
 import GoogleAccount from './components/GoogleAccount';
@@ -10,7 +10,6 @@ import useResizablePanels from './hooks/useResizablePanels';
 const MAP_CONTAINER_ID = 'map';
 
 function App() {
-  const [routeData, setRouteData] = useState(null);
 
   const isStacked = useMediaQuery(MOBILE_QUERY);
   const { map, directionsRenderer } = useGoogleMap(MAP_CONTAINER_ID);
@@ -23,25 +22,22 @@ function App() {
     <div className="app-shell" ref={containerRef} style={panelStyle}>
       <div className="sidebar">
         <div className="sidebar-card">
+          <header className="sidebar-header">
           <h1 className="brand-title">VroomMates</h1>
           <p className="brand-subtitle">
             Enter locations for drivers, passengers, and destination:
           </p>
 
-          <GoogleAccount auth={auth} />
+          </header>
 
           <LocationInput
             map={map}
             directionsRenderer={directionsRenderer}
-            setRouteData={setRouteData}
+            auth={auth}
+            accountControls={<GoogleAccount auth={auth} />}
           />
 
-          {routeData && (
-            <div className="route-data-card">
-              <h3>Optimized Route Data</h3>
-              <pre>{JSON.stringify(routeData, null, 2)}</pre>
-            </div>
-          )}
+
         </div>
       </div>
 
