@@ -1,12 +1,6 @@
-# Vercel only deploys the React static site for this project.
-# The Flask backend (app.py) is run locally on port 5000 against
-# the React dev server; it is not deployed to Vercel.
-# Without this file, Vercel auto-detects `requirements.txt` and
-# tries to install Python deps with `uv pip install` on Python 3.14,
-# which fails on the older Pillow / scipy / pandas pins.
-app.py
-requirements.txt
-backend/
+# Both Vercel projects deploy from this root: the React site (Create React App
+# preset) and the Flask API (Flask preset, entrypoint app.py). Keep the backend
+# files visible so the API project can build them.
 __pycache__/
 .venv/
 *.py[cod]

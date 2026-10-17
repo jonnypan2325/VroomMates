@@ -194,12 +194,22 @@ In PowerShell, set `$env:CI = "true"` before running the npm test command.
 
 ## Deployment
 
-Vercel builds and deploys the React frontend only. `package.json` selects Node.js
-24.x through `engines.node`, overriding the dashboard runtime setting. `.vercelignore` excludes
-`app.py`, `backend/`, `requirements.txt`, and Python environment/cache files.
-The Flask backend needs a separate host; this repository does not configure one.
-Set `REACT_APP_FLASK_API_URL` to that backend's URL when building the frontend.
+Two Vercel projects deploy from this repository root. The frontend project uses the
+Create React App preset; `package.json` selects Node.js 24.x through `engines.node`,
+overriding the dashboard runtime setting. The API project uses the Flask preset with
+`app.py` as its entrypoint and installs `requirements.txt`. `.vercelignore` excludes only
+Python environment/cache files, so both projects see the backend sources.
+Set `REACT_APP_FLASK_API_URL` to the API project's URL when building the frontend.
 The `python app.py` command starts a debug development server.
+
+The API project reaches Firestore through Vercel OIDC and Google Workload Identity
+Federation. Set `GCP_PROJECT_NUMBER`, `GCP_WORKLOAD_IDENTITY_POOL_ID`,
+`GCP_WORKLOAD_IDENTITY_POOL_PROVIDER_ID` and `GCP_SERVICE_ACCOUNT_EMAIL` on it. Vercel
+sends a short-lived token in the `x-vercel-oidc-token` request header; the backend keeps
+the latest one for credential refresh. Its audience stays `https://vercel.com/<team-slug>`,
+so configure the pool provider's allowed audiences with that value. Disable Vercel
+Deployment Protection on the API project: browser preflight cannot carry Vercel's
+login cookie across origins, and protected routes already require Google proof.
 
 ## Project layout
 
@@ -299,9 +309,9 @@ concurrency or real-user route acceptance.
 
 ### Private saved-data API (local implementation)
 
-The saved-trip and saved-location APIs use Firestore through Flask. The target is Vercel-hosted Flask with Firestore in the existing Google project; infrastructure is not provisioned by these changes. The current Vercel deployment still excludes Flask. Deployment packaging, database/region/IAM, exact hosted origins and real two-account/device recovery need a separate delivery check.
+The saved-trip and saved-location APIs use Firestore through Flask. The target is Vercel-hosted Flask with Firestore in the existing Google project. Database/region/IAM, exact hosted origins and real two-account/device recovery need a separate hosted check.
 
-Send the Google ID token in `Authorization: Bearer ...` for each protected request. Flask verifies it and derives ownership from Google subject, then selects the account's isolated Firestore document namespace. Browser clients do not connect directly to Firestore; no Firebase Authentication migration is needed. `FIRESTORE_PROJECT_ID` and optional `FIRESTORE_DATABASE_ID` are server-only settings. The SDK uses server Application Default Credentials; no database credential belongs in a `REACT_APP_` variable. Prefer Vercel OIDC / Google Workload Identity Federation for deployment; the Python refresh integration and project/environment IAM restrictions still need implementation and hosted verification. Never place actual credential values in this repo or its CDK record.
+Send the Google ID token in `Authorization: Bearer ...` for each protected request. Flask verifies it and derives ownership from Google subject, then selects the account's isolated Firestore document namespace. Browser clients do not connect directly to Firestore; no Firebase Authentication migration is needed. `FIRESTORE_PROJECT_ID` and optional `FIRESTORE_DATABASE_ID` are server-only settings. The SDK uses server Application Default Credentials; no database credential belongs in a `REACT_APP_` variable. On Vercel, the four `GCP_*` settings switch the SDK to Vercel OIDC / Google Workload Identity Federation (see Deployment); hosted verification of project/environment IAM restrictions is still pending. Never place actual credential values in this repo or its CDK record.
 
 - `POST /saved-trips`: `{id: UUIDv4, title, snapshot: {schema_version: 1, inputs: {drivers, passengers, destination}, routes}}`. Each input point has a unique `stop_id`, optional independent user label and `{kind: "google_places", place_id}` source; drivers also have positive integer capacity. A route is `{driver_id, stop_ids: [driver, ...passengers, destination]}`. Ordered occurrence references preserve repeated pickup places. Addresses, coordinates and provider responses are rejected. Saved assignments are preserved; reopening resolves current place details and does not automatically optimize again.
 - `GET /saved-trips`: owner summaries, default50/max100 with opaque `cursor`; `GET /saved-trips/<id>` loads references; `DELETE` returns204 including already missing/foreign IDs.

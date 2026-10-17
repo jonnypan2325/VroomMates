@@ -13,6 +13,7 @@ from .routes import register_routes
 from .saved_store import FirestoreSavedStore
 from .saved_trips import register_saved_trip_routes
 from .saved_locations import register_saved_location_routes
+from .vercel_credentials import SETTINGS as WIF_SETTINGS, VercelOidcTokenSupplier, workload_identity_credentials
 from .auth import auth_error
 from flask import request
 from werkzeug.exceptions import HTTPException
@@ -51,6 +52,7 @@ def create_app(config=None):
         FIRESTORE_PROJECT_ID=os.environ.get("FIRESTORE_PROJECT_ID"),
         FIRESTORE_DATABASE_ID=os.environ.get("FIRESTORE_DATABASE_ID", "(default)"),
         CORS_ALLOWED_ORIGINS=os.environ.get("CORS_ALLOWED_ORIGINS", "http://localhost:3000"),
+        **{name: os.environ.get(name) for name in WIF_SETTINGS},
     )
     if config is not None:
         app.config.update(config)
@@ -72,9 +74,18 @@ def create_app(config=None):
     app.logger.setLevel(logging.INFO)
     register_routes(app)
     register_auth_routes(app)
+    oidc = VercelOidcTokenSupplier(os.environ.get('VERCEL_OIDC_TOKEN'))
+    credentials = workload_identity_credentials(app.config, oidc)
+    if credentials is not None:
+        app.extensions['vercel_oidc'] = oidc
+
+        @app.before_request
+        def remember_vercel_oidc_token():
+            oidc.remember(request.headers.get('x-vercel-oidc-token'))
     store = app.config.get('SAVED_DATA_STORE')
     if store is None:
-        store = FirestoreSavedStore(project=app.config['FIRESTORE_PROJECT_ID'], database=app.config['FIRESTORE_DATABASE_ID'])
+        store = FirestoreSavedStore(project=app.config['FIRESTORE_PROJECT_ID'], database=app.config['FIRESTORE_DATABASE_ID'],
+                                    credentials=credentials)
     app.extensions['saved_data_store'] = store
     register_saved_trip_routes(app, store)
     register_saved_location_routes(app, store)

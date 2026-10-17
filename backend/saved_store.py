@@ -44,9 +44,9 @@ def _reservation_key(label):
 
 class FirestoreSavedStore:
     """Injected SDK clients enable emulator tests without opening ADC credentials."""
-    def __init__(self, client=None, project=None, database='(default)', clock=None):
+    def __init__(self, client=None, project=None, database='(default)', clock=None, credentials=None):
         self._client = client
-        self.project, self.database = project, database
+        self.project, self.database, self.credentials = project, database, credentials
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self._lock = threading.Lock()
 
@@ -58,7 +58,7 @@ class FirestoreSavedStore:
             with self._lock:
                 if self._client is None:
                     try:
-                        self._client = firestore.Client(project=self.project, database=self.database)
+                        self._client = firestore.Client(project=self.project, database=self.database, credentials=self.credentials)
                     except (GoogleAuthError, GoogleAPICallError, ValueError):
                         raise StoreUnavailable() from None
         return self._client
