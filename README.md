@@ -204,7 +204,9 @@ The `python app.py` command starts a debug development server.
 
 The API project reaches Firestore through Vercel OIDC and Google Workload Identity
 Federation. Set `GCP_PROJECT_NUMBER`, `GCP_WORKLOAD_IDENTITY_POOL_ID`,
-`GCP_WORKLOAD_IDENTITY_POOL_PROVIDER_ID` and `GCP_SERVICE_ACCOUNT_EMAIL` on it. Vercel
+`GCP_WORKLOAD_IDENTITY_POOL_PROVIDER_ID` and `GCP_SERVICE_ACCOUNT_EMAIL` on it, along
+with `GOOGLE_CLIENT_ID`, `CORS_ALLOWED_ORIGINS` and `FIRESTORE_PROJECT_ID`; without the
+project ID every saved-data request fails as unavailable. Vercel
 sends a short-lived token in the `x-vercel-oidc-token` request header; the backend keeps
 the latest one for credential refresh. Its audience stays `https://vercel.com/<team-slug>`,
 so configure the pool provider's allowed audiences with that value. Disable Vercel
