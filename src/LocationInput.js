@@ -2,19 +2,34 @@ import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from
 import AddressInput from './components/AddressInput';
 import SavedTripsPanel from './saving/SavedTripsPanel';
 import useSavedLocations from './saving/useSavedLocations';
-import { SavedLocationControls, SavedLocationsPanel, SectionSavedPicker } from './saving/SavedLocationControls';
+import { SavedLocationControls, SavedLocationsPanel } from './saving/SavedLocationControls';
 import { freezeInputs, makeResult, newDriver, newPoint, newPassengerPickup, resizePickup, expandPassengerPickups, groupPassengerPickups, reopenSnapshot } from './saving/tripSnapshot';
 import { hasCoordinates, resolvePlace } from './saving/places';
 import './saving/Saving.css';
 
 const API_BASE_URL = (process.env.REACT_APP_FLASK_API_URL || 'http://127.0.0.1:5000').replace(/\/$/, '');
 
+const placed = (points) => points.length > 0 && points.every((point) => hasCoordinates(point.coordinates));
+
+function SectionHeading({ title, done, column }) {
+  return <div className="driver-section-heading">
+    <h3>{title}{done && <><svg className="section-done" aria-hidden="true" width="14" height="14" viewBox="0 0 16 16" fill="none">
+      <path d="m3.5 8.5 3 3 6-7" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" /></svg>
+      <span className="visually-hidden"> (complete)</span></>}
+      {column && <span className="section-column" aria-hidden="true">{column}</span>}</h3>
+  </div>;
+}
+
+function listNames(names) {
+  return names.join(', ');
+}
+
 function AccountBoundary({ auth, children }) {
   const saved = useSavedLocations(auth);
   return children(saved);
 }
 
-export default function LocationInput({ map, directionsRenderer, auth, accountControls }) {
+export default function LocationInput({ map, directionsRenderer, auth }) {
   const [drivers, setDrivers] = useState(() => [newDriver()]);
   const [passengers, setPassengers] = useState(() => [newPassengerPickup()]);
   const [destination, setDestination] = useState(newPoint);
@@ -23,6 +38,8 @@ export default function LocationInput({ map, directionsRenderer, auth, accountCo
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [activeView, setActiveView] = useState('plan');
+  const [openedTrip, setOpenedTrip] = useState(null);
+  const [cleared, setCleared] = useState(null);
   const scrollPane = useRef(null);
   const addDriverButton = useRef(null);
   const addPassengerButton = useRef(null);
@@ -43,6 +60,7 @@ export default function LocationInput({ map, directionsRenderer, auth, accountCo
   const privateStale = privateOwner.current && privateOwner.current !== authKey;
 
   const invalidate = useCallback(() => {
+    setCleared(null); // Any new edit, load or account change ends the chance to undo a reset.
     revision.current += 1;
     operation.current += 1;
     controllers.current.forEach((controller) => controller.abort());
@@ -63,6 +81,7 @@ export default function LocationInput({ map, directionsRenderer, auth, accountCo
       if (previous.authKey !== authKey) setActiveView('plan');
       if (privateOwner.current && privateOwner.current !== authKey) {
         privateOwner.current = null;
+        setOpenedTrip(null);
         setDrivers([newDriver()]);
         setPassengers([newPassengerPickup()]);
         setDestination(newPoint());
@@ -138,6 +157,9 @@ export default function LocationInput({ map, directionsRenderer, auth, accountCo
     setError('');
     setter((list) => list.map((point) => point.stop_id === id ? { ...point, ...patch } : point));
   };
+  // A confirmed save names the row only if it still holds the place that was saved.
+  const nameSaved = (setter, id, row) => setter((list) => list.map((point) => point.stop_id === id
+    && point.source?.place_id === row.source.place_id ? { ...point, label: row.label } : point));
   const removePoint = (setter, id, addButton) => {
     invalidate(); setError('');
     setter((list) => list.filter((point) => point.stop_id !== id));
@@ -147,6 +169,33 @@ export default function LocationInput({ map, directionsRenderer, auth, accountCo
     invalidate(); setError('');
     setDestination((point) => ({ ...point, ...patch }));
   };
+
+  // Clears the planner (and any opened trip) but never saved trips or locations; Undo restores it.
+  const startOver = () => {
+    const before = { drivers, passengers, destination, result, selectedDriver, openedTrip };
+    invalidate(); setError(''); setMapError('');
+    setOpenedTrip(null);
+    setDrivers([newDriver()]);
+    setPassengers([newPassengerPickup()]);
+    setDestination(newPoint());
+    setResult(null);
+    setSelectedDriver(0);
+    setCleared(before);
+    scrollPane.current?.scrollTo({ top: 0 });
+  };
+  const undoStartOver = () => {
+    if (!cleared) return;
+    invalidate();
+    setDrivers(cleared.drivers);
+    setPassengers(cleared.passengers);
+    setDestination(cleared.destination);
+    setResult(cleared.result);
+    setSelectedDriver(cleared.selectedDriver);
+    setOpenedTrip(cleared.openedTrip);
+  };
+  const filled = (point) => Boolean(point.address.trim() || point.source);
+  const dirty = Boolean(result || drivers.length !== 1 || passengers.length !== 1
+    || [...drivers, ...passengers, destination].some(filled));
 
   const token = () => ({ owner: latest.current.authKey, revision: revision.current, operation: ++operation.current, map: latest.current.map });
   const current = (captured) => mounted.current && captured.owner === latest.current.authKey &&
@@ -273,6 +322,22 @@ export default function LocationInput({ map, directionsRenderer, auth, accountCo
     if (next) { event.preventDefault(); navigate(next, true); }
   };
 
+  const savedChoices = (saved, onSavedSelect) => auth.status === 'authenticated'
+    ? { savedLocations: saved.locations, onSavedSelect } : {};
+  const unplaced = [...drivers.map((point, index) => [point, 'Driver ' + (index + 1)]),
+    ...passengers.map((point, index) => [point, 'Pickup ' + (index + 1)]), [destination, 'destination']]
+    .filter(([point]) => !hasCoordinates(point.coordinates)).map(([, name]) => name);
+  const missing = !drivers.length ? 'Add a driver.'
+    : !passengers.length ? 'Add a pickup.'
+      : unplaced.length > 3 ? `Missing places for ${unplaced.length} stops.`
+        : unplaced.length ? `Missing: ${listNames(unplaced)}.` : '';
+  // Calculate stays focusable while places are missing; pressing it leads to the first empty field.
+  const focusFirstMissing = () => {
+    const name = unplaced[0];
+    if (!name) return;
+    const label = name === 'destination' ? 'Destination' : name + ' location';
+    scrollPane.current?.querySelector(`input[aria-label="${label}"]`)?.focus();
+  };
   // Hide private form/result during the account-transition render; layout reset precedes paint.
   if (privateStale) return null;
   return (
@@ -292,30 +357,28 @@ export default function LocationInput({ map, directionsRenderer, auth, accountCo
             ))}
           </div>
           <div className="planner-scroll" ref={scrollPane} tabIndex="0" aria-label="Planner content">
-          {accountControls && <div className="planner-account">{accountControls}</div>}
           <div id="planner-panel-plan" role="tabpanel" aria-labelledby="planner-tab-plan" hidden={activeView !== 'plan'}>
-          <div className="driver-section-heading">
-            <h3>Drivers</h3>
-            {auth.status === 'authenticated' && <SectionSavedPicker section="drivers" saved={saved} onSelect={(record) => {
-              const empty = drivers.find((point) => !point.address.trim() && !point.source);
-              return selectPlace(record, empty || newDriver(), setDrivers, false, !empty);
-            }} />}
-          </div>
-          <p id="driver-seats-help" className="saving-note quantity-help">Available seats for passengers, excluding the driver.</p>
+          {openedTrip && auth.status === 'authenticated' ? <div className="editing-trip">
+            <p>Editing <strong>{openedTrip.title}</strong></p>
+            <button type="button" className="text-button" onClick={startOver}>Start over</button>
+          </div> : null}
+          <SectionHeading title="Drivers" done={placed(drivers)} column="Seats" />
+          <p id="driver-seats-help" className="visually-hidden">Seats: room for passengers, not counting the driver.</p>
           {drivers.map((point, index) => (
             <div className="planner-location" key={point.stop_id}>
               <SavedLocationControls showPicker={false} auth={auth} point={point} saved={saved}
                 fieldLabel={'Driver ' + (index + 1)} onSelect={(record) => selectPlace(record, point, setDrivers)}
+                onSaved={(row) => nameSaved(setDrivers, point.stop_id, row)}
                 renderAddress={(action) => <div className="driver-input-group">
+                  <AddressInput map={map} value={point.address} label={'Driver ' + (index + 1) + ' location'} nickname={point.label}
+                    placeholder={'Driver ' + (index + 1) + ' location'} action={action}
+                    {...savedChoices(saved, (record) => selectPlace(record, point, setDrivers))}
+                    onChange={(patch) => edit(setDrivers, point.stop_id, patch)} />
                   <label className="planner-quantity-field">
-                    <span>Passenger seats</span>
                     <input type="number" min="1" inputMode="numeric" value={point.capacity}
                       aria-label={'Driver ' + (index + 1) + ' passenger seats'} aria-describedby="driver-seats-help"
                       onChange={(event) => edit(setDrivers, point.stop_id, { capacity: Number(event.target.value) })} />
                   </label>
-                  <AddressInput map={map} value={point.address} label={'Driver ' + (index + 1) + ' location'}
-                    placeholder={'Driver ' + (index + 1) + ' location'} action={action}
-                    onChange={(patch) => edit(setDrivers, point.stop_id, patch)} />
                   <button type="button" className="remove-location-button" aria-label={'Remove Driver ' + (index + 1)}
                     title={'Remove Driver ' + (index + 1)} onClick={() => removePoint(setDrivers, point.stop_id, addDriverButton)}>
                     <svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="m4 4 8 8M12 4l-8 8" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" /></svg>
@@ -327,29 +390,24 @@ export default function LocationInput({ map, directionsRenderer, auth, accountCo
             invalidate(); setDrivers((list) => [...list, newDriver()]);
           }}>Add Driver</button>
 
-          <div className="driver-section-heading">
-            <h3>Passenger pickups</h3>
-            {auth.status === 'authenticated' && <SectionSavedPicker section="passengers" saved={saved} onSelect={(record) => {
-              const empty = passengers.find((point) => !point.address.trim() && !point.source);
-              return selectPlace(record, empty || newPassengerPickup(), setPassengers, false, !empty);
-            }} />}
-          </div>
-          <p className="saving-note quantity-help">Enter the number of people at each pickup. They may ride in different cars.</p>
+          <SectionHeading title="Passenger pickups" done={placed(passengers)} column="People" />
+          <p id="pickup-people-help" className="visually-hidden">People: how many wait at this pickup. They may ride in different cars.</p>
           {passengers.map((point, index) => (
             <div className="planner-location" key={point.stop_id}>
               <SavedLocationControls showPicker={false} auth={auth} point={point} saved={saved}
                 fieldLabel={'Pickup ' + (index + 1)} onSelect={(record) => selectPlace(record, point, setPassengers)}
+                onSaved={(row) => nameSaved(setPassengers, point.stop_id, row)}
                 renderAddress={(action) => <div className="passenger-input-group">
+                  <AddressInput map={map} value={point.address} label={'Pickup ' + (index + 1) + ' location'} nickname={point.label}
+                    placeholder={'Pickup ' + (index + 1) + ' location'} action={action}
+                    {...savedChoices(saved, (record) => selectPlace(record, point, setPassengers))}
+                    onChange={(patch) => edit(setPassengers, point.stop_id, patch)} />
                   <label className="planner-quantity-field">
-                    <span>Passengers</span>
                     <input type="number" min="1" max="12" step="1" inputMode="numeric" value={point.count}
-                      aria-label={'Passengers at pickup ' + (index + 1)}
+                      aria-label={'Passengers at pickup ' + (index + 1)} aria-describedby="pickup-people-help"
                       onChange={(event) => edit(setPassengers, point.stop_id,
                         resizePickup(point, event.target.value === '' ? '' : Number(event.target.value)))} />
                   </label>
-                  <AddressInput map={map} value={point.address} label={'Pickup ' + (index + 1) + ' location'}
-                    placeholder={'Pickup ' + (index + 1) + ' location'} action={action}
-                    onChange={(patch) => edit(setPassengers, point.stop_id, patch)} />
                   <button type="button" className="remove-location-button" aria-label={'Remove pickup ' + (index + 1)}
                     title={'Remove pickup ' + (index + 1)} onClick={() => removePoint(setPassengers, point.stop_id, addPassengerButton)}>
                     <svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="m4 4 8 8M12 4l-8 8" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" /></svg>
@@ -361,30 +419,46 @@ export default function LocationInput({ map, directionsRenderer, auth, accountCo
             invalidate(); setPassengers((list) => [...list, newPassengerPickup()]);
           }}>Add pickup</button>
 
-          <h3>Destination</h3>
-          <AddressInput map={map} className="full-width-input" value={destination.address}
-            label="Destination" placeholder="Destination" onChange={editDestination}
-            savedLocations={saved.locations} onSavedSelect={(record) => selectPlace(record, destination, setDestination, true)} />
-          <SavedLocationControls showPicker={false} auth={auth} point={destination} saved={saved} fieldLabel="Destination"
-            onSelect={(record) => selectPlace(record, destination, setDestination, true)} />
-          <button type="button" className="submit-btn" disabled={busy} onClick={submit}>
+          <SectionHeading title="Destination" done={placed([destination])} />
+          <div className="planner-location">
+            <SavedLocationControls showPicker={false} auth={auth} point={destination} saved={saved} fieldLabel="Destination"
+              onSelect={(record) => selectPlace(record, destination, setDestination, true)}
+              onSaved={(row) => setDestination((point) => point.source?.place_id === row.source.place_id
+                ? { ...point, label: row.label } : point)}
+              renderAddress={(action) => <AddressInput map={map} className="full-width-input" value={destination.address}
+                label="Destination" placeholder="Destination" onChange={editDestination}
+                {...savedChoices(saved, (record) => selectPlace(record, destination, setDestination, true))}
+                nickname={destination.label} action={action} />} />
+          </div>
+          <button type="button" className={'submit-btn' + (missing ? ' is-unavailable' : '')} disabled={busy}
+            aria-disabled={missing ? 'true' : undefined} aria-describedby={missing ? 'calculate-missing' : undefined}
+            onClick={missing ? focusFirstMissing : submit}>
             {busy ? 'Loading route…' : 'Calculate route'}
           </button>
+          {/* One fixed row under Calculate: status on the left, Start over or Undo on the right, so nothing above it moves. */}
+          {(missing || cleared || dirty) && <div className="calculate-row">
+            {cleared ? <p className="saving-note" role="status">Planner cleared.</p>
+              : <p id="calculate-missing" className="saving-note">{missing}</p>}
+            {cleared ? <button type="button" className="text-button" onClick={undoStartOver}>Undo</button>
+              : dirty && !(openedTrip && auth.status === 'authenticated')
+                && <button type="button" className="text-button" onClick={startOver}>Start over</button>}
+          </div>}
           {error && <p role="alert" className="saving-error">{error}</p>}
 
           {result && (
             <section className="route-summary">
               <h3>Your route</h3>
-              <p className="saving-note">{result.inputs.drivers.length} driver{result.inputs.drivers.length === 1 ? '' : 's'} · {result.inputs.passengers.length} passenger{result.inputs.passengers.length === 1 ? '' : 's'}</p>
-              <label htmlFor="driver-view">Driver view</label>
+              <div className="label-row">
+                <label htmlFor="driver-view">Driver view</label>
+                {/* Directions load in the label row so the save controls below never jump. */}
+                <span role="status" className="saving-note">{mapBusy ? 'Loading directions…' : ''}</span>
+              </div>
               <select id="driver-view" value={selectedDriver} onChange={(event) => setSelectedDriver(Number(event.target.value))}>
                 {result.inputs.drivers.map((driver, index) => (
                   <option key={driver.stop_id} value={index}>{driver.label || 'Driver ' + (index + 1)}</option>
                 ))}
               </select>
-              <p className="saving-note">This route uses the locations from your last calculation or saved route.</p>
               {result.saveError && <p className="saving-note">{result.saveError}</p>}
-              {mapBusy && <p role="status" className="saving-note">Loading map directions…</p>}
               {mapError && <div className="saving-error" role="alert">
                 <p>{mapError}</p>
                 <button type="button" className="secondary-button" disabled={mapBusy}
@@ -394,6 +468,7 @@ export default function LocationInput({ map, directionsRenderer, auth, accountCo
           )}
           </div>
           <SavedTripsPanel auth={auth} activeView={activeView} snapshot={result?.snapshot || null} routeAvailable={!!result}
+            openedTrip={openedTrip} onOpened={setOpenedTrip}
             onBeginLoad={beginLoad} onEndLoad={endLoad} onLoad={loadTrip} />
           <div id="planner-panel-locations" role="tabpanel" aria-labelledby="planner-tab-locations" hidden={activeView !== 'locations'}>
             <SavedLocationsPanel auth={auth} saved={saved} map={map} activeView={activeView} />

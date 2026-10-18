@@ -1,5 +1,7 @@
 import React, { useEffect, useId, useRef, useState } from 'react';
 import { SavedApiError, canonicalText, newId, requestJSON, sameData } from './api';
+import { Chevron } from './SavedLocationControls';
+import InlineEdit from './InlineEdit';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const STOP_ID = /^[A-Za-z0-9_-]{1,64}$/;
@@ -114,7 +116,8 @@ function freezeIntent(value) {
 
 const emptyList = (scope) => ({ scope, trips: [], cursor: null, loaded: false, loading: false, error: '' });
 
-export default function SavedTripsPanel({ auth, snapshot, onLoad, onBeginLoad, onEndLoad, routeAvailable = false, activeView = 'all' }) {
+export default function SavedTripsPanel({ auth, snapshot, onLoad, onBeginLoad, onEndLoad, routeAvailable = false, activeView = 'all',
+  openedTrip = null, onOpened }) {
   const authenticated = auth?.status === 'authenticated' && typeof auth.profile?.id === 'string';
   const scope = authenticated ? `${auth.profile.id}:${auth.generation}` : null;
   const titleId = useId();
@@ -133,6 +136,7 @@ export default function SavedTripsPanel({ auth, snapshot, onLoad, onBeginLoad, o
   const [saveBusy, setSaveBusy] = useState(false);
   const [saveError, setSaveError] = useState('');
   const [saveSuccess, setSaveSuccess] = useState('');
+  const [saveOpen, setSaveOpen] = useState(false);
   const [confirmed, setConfirmed] = useState(null);
   const [list, setList] = useState(() => emptyList(scope));
   const tripsVisible = activeView === 'trips' || activeView === 'all';
@@ -212,7 +216,7 @@ export default function SavedTripsPanel({ auth, snapshot, onLoad, onBeginLoad, o
     }
   }, [scope, tripsVisible, list.scope, activeList.loaded, activeList.loading, activeList.error]);
 
-  const saveTrip = async (retry = false) => {
+  const saveTrip = async (retry = false, asNew = false) => {
     if (!scope || saveLock.current) return;
     let attempt = intentRef.current?.scope === scope ? intentRef.current : null;
     if (attempt && !retry) return;
@@ -220,7 +224,7 @@ export default function SavedTripsPanel({ auth, snapshot, onLoad, onBeginLoad, o
       try {
         if (!snapshot) throw new Error('No savable route.');
         const body = freezeIntent({ id: newId(), title: canonicalText(title, 200, 200), snapshot: canonicalSnapshot(snapshot) });
-        if (confirmed?.scope === scope && sameData(confirmed.content, { title: body.title, snapshot: body.snapshot })) return;
+        if (!asNew && confirmed?.scope === scope && sameData(confirmed.content, { title: body.title, snapshot: body.snapshot })) return;
         attempt = { scope, body };
         intentRef.current = attempt; setIntent(attempt);
       } catch (error) {
@@ -255,6 +259,8 @@ export default function SavedTripsPanel({ auth, snapshot, onLoad, onBeginLoad, o
       intentRef.current = null; setIntent(null);
       setConfirmed({ scope, content: { title: attempt.body.title, snapshot: attempt.body.snapshot } });
       setSaveSuccess('Route saved. Find it in My trips.');
+      setSaveOpen(false);
+      onOpened?.({ id: attempt.body.id, title: attempt.body.title });
       if (tripsVisibleRef.current) {
         void fetchList();
       } else {
@@ -294,7 +300,12 @@ export default function SavedTripsPanel({ auth, snapshot, onLoad, onBeginLoad, o
       if (!isCurrent(request)) return;
       const trip = readTrip(response, id);
       await onLoad(trip.snapshot, loadToken);
-      if (isCurrent(request)) setActionSuccess('Trip loaded with fresh place details.');
+      if (isCurrent(request)) {
+        setActionSuccess('Trip loaded with fresh place details.');
+        setTitle(trip.title); setSaveError(''); setSaveSuccess('');
+        setConfirmed({ scope, content: { title: trip.title, snapshot: trip.snapshot } });
+        onOpened?.({ id: trip.id, title: trip.title });
+      }
     } catch (error) {
       if (isCurrent(request)) setActionError(failureMessage(error, 'This trip could not be loaded. Check place availability and try again.'));
     } finally {
@@ -305,6 +316,53 @@ export default function SavedTripsPanel({ auth, snapshot, onLoad, onBeginLoad, o
         finishRequest(request);
         if (isCurrent(request)) { actionLock.current = false; setAction(null); }
       }
+    }
+  };
+
+  // PATCH replaces the named fields, so a retry after an unclear reply repeats the same change.
+  const patchTrip = async (id, body) => {
+    const request = startRequest();
+    try {
+      const response = await requestJSON(auth, `/saved-trips/${id}`, { method: 'PATCH', body, signal: request.controller.signal });
+      if (!isCurrent(request)) return null;
+      const trip = readTrip(response, id);
+      if ((body.title && trip.title !== body.title) || (body.snapshot && !sameData(trip.snapshot, body.snapshot))) {
+        throw new SavedApiError(503, 'INVALID_RESPONSE', 'The change could not be confirmed.');
+      }
+      setList((old) => ({ ...old, trips: old.trips.map((row) => row.id === id ? { ...row, title: trip.title } : row) }));
+      if (openedTrip?.id === id) onOpened?.({ id, title: trip.title });
+      return trip;
+    } finally { finishRequest(request); }
+  };
+
+  const updateTrip = async () => {
+    if (!scope || saveLock.current || !openedTrip || !snapshot) return;
+    let body;
+    try { body = { title: canonicalText(title, 200, 200), snapshot: canonicalSnapshot(snapshot) }; }
+    catch (error) { setSaveError('Enter a route name of up to 200 bytes and select Google places for every route stop.'); return; }
+    saveLock.current = true; setSaveBusy(true); setSaveError(''); setSaveSuccess('');
+    try {
+      const trip = await patchTrip(openedTrip.id, body);
+      if (!trip) return;
+      setConfirmed({ scope, content: { title: trip.title, snapshot: trip.snapshot } });
+      setSaveSuccess(`Updated “${trip.title}”.`);
+      setSaveOpen(false);
+    } catch (error) {
+      setSaveError(failureMessage(error, 'The update could not be confirmed. Please retry.'));
+    } finally { saveLock.current = false; setSaveBusy(false); }
+  };
+
+  const renameTrip = async (trip, next) => {
+    setActionError(''); setActionSuccess('');
+    let name;
+    try { name = canonicalText(next, 200, 200); }
+    catch (error) { setActionError('Use a trip name of up to 200 characters.'); throw error; }
+    try {
+      const updated = await patchTrip(trip.id, { title: name });
+      if (updated) setActionSuccess(`Renamed to “${updated.title}”.`);
+    } catch (error) {
+      setActionError(failureMessage(error, 'The new name could not be saved. Please retry.'));
+      throw error;
     }
   };
 
@@ -344,31 +402,39 @@ export default function SavedTripsPanel({ auth, snapshot, onLoad, onBeginLoad, o
 
   return (
     <>
-    <section className="saving-card" aria-label="Save route" hidden={!saveVisible}>
-      <h2>Save route</h2>
-      <p className="saving-note">Save the displayed route and its pickup order. Places are refreshed when you reopen it.</p>
-      <div className="saving-row">
+    <section className="saving-card trip-save" aria-label="Save route" hidden={!saveVisible}>
+      <button type="button" className="secondary-button disclosure-button" aria-expanded={saveOpen || !!activeIntent}
+        aria-controls={titleId + '-panel'} disabled={!!activeIntent} onClick={() => { setSaveOpen((open) => !open); setSaveSuccess(''); }}>
+        {openedTrip ? 'Save changes' : 'Save this route'} <Chevron open={saveOpen || !!activeIntent} />
+      </button>
+      <div id={titleId + '-panel'} className="trip-save-form" hidden={!saveOpen && !activeIntent}>
         <label htmlFor={titleId}>Route name</label>
         <input id={titleId} type="text" value={title} disabled={!!activeIntent || saveBusy}
-          placeholder="Give this route a name" onChange={(event) => {
+          placeholder="e.g. Friday dinner" onChange={(event) => {
             setTitle(event.target.value); setSaveError(''); setSaveSuccess('');
-          }} />
+          }} onKeyDown={(event) => { if (event.key === 'Enter' && snapshot && title.trim() && !alreadySaved) void saveTrip(); }} />
+        <div className="saving-actions">
+          {activeIntent ? (
+            <button type="button" disabled={saveBusy} onClick={() => void saveTrip(true)}>
+              {saveBusy ? 'Saving…' : 'Check and retry save'}
+            </button>
+          ) : openedTrip ? (<>
+            <button type="button" disabled={!snapshot || saveBusy || alreadySaved || !title.trim()} onClick={() => void updateTrip()}>
+              {saveBusy ? 'Saving…' : alreadySaved ? 'No changes to save' : `Update “${openedTrip.title}”`}
+            </button>
+            <button type="button" className="secondary-button" disabled={!snapshot || saveBusy || !title.trim()}
+              onClick={() => void saveTrip(false, true)}>Save as new trip</button>
+          </>) : (
+            <button type="button" disabled={!snapshot || saveBusy || alreadySaved || !title.trim()} onClick={() => void saveTrip()}>
+              {saveBusy ? 'Saving…' : alreadySaved ? 'Route saved' : 'Save route'}
+            </button>
+          )}
+        </div>
+        {!snapshot && <p className="saving-note">{routeAvailable
+          ? 'To save this route, select a Google place for every stop and calculate again.'
+          : 'Calculate a route to save it.'}</p>}
+        {activeIntent && <p className="saving-note">This attempt keeps its original name and route until its save status is resolved.</p>}
       </div>
-      <div className="saving-actions">
-        {activeIntent ? (
-          <button type="button" disabled={saveBusy} onClick={() => void saveTrip(true)}>
-            {saveBusy ? 'Saving…' : 'Check and retry save'}
-          </button>
-        ) : (
-          <button type="button" disabled={!snapshot || saveBusy || alreadySaved || !title.trim()} onClick={() => void saveTrip()}>
-            {saveBusy ? 'Saving…' : alreadySaved ? 'Route saved' : 'Save route'}
-          </button>
-        )}
-      </div>
-      {!snapshot && <p className="saving-note">{routeAvailable
-        ? 'To save this route, select a Google place for every stop and calculate again.'
-        : 'Calculate a route to save it.'}</p>}
-      {activeIntent && <p className="saving-note">This attempt keeps its original name and route until its save status is resolved.</p>}
       {saveError && <p className="saving-error" role="alert">{saveError}</p>}
       {saveSuccess && <p className="saving-success" role="status">{saveSuccess}</p>}
     </section>
@@ -377,39 +443,47 @@ export default function SavedTripsPanel({ auth, snapshot, onLoad, onBeginLoad, o
       role={activeView === 'all' ? undefined : 'tabpanel'}
       aria-labelledby={activeView === 'all' ? undefined : 'planner-tab-trips'}
       aria-label={activeView === 'all' ? 'My trips' : undefined}>
-        <h2>My trips</h2>
-        <div className="saving-actions">
-          <button ref={refreshButton} type="button" className="secondary-button" disabled={activeList.loading || !!activeAction}
-            onClick={() => void fetchList()}>{activeList.loading ? 'Loading…' : activeList.error ? 'Retry My trips' : 'Refresh'}</button>
+        <div className="list-heading">
+          <h2>My trips{activeList.trips.length ? ` (${activeList.trips.length})` : ''}</h2>
+          <button ref={refreshButton} type="button" className="text-button" disabled={activeList.loading || !!activeAction}
+            onClick={() => void fetchList()}>{activeList.loading ? 'Loading…' : activeList.error ? 'Retry' : 'Refresh'}</button>
         </div>
-        {activeList.loading && <p className="saving-note" role="status">Loading saved trips…</p>}
+        {activeList.loading && !activeList.trips.length && <p className="saving-note" role="status">Loading saved trips…</p>}
         {activeList.error && <p className="saving-error" role="alert">{activeList.error}</p>}
         {activeList.loaded && !activeList.loading && activeList.trips.length === 0 && !activeList.error
           && <p className="saving-note">No saved trips yet. Save a calculated route to find it here.</p>}
         <ul className="saving-list">
           {activeList.trips.map((trip) => (
-            <li key={trip.id} className="saving-item">
-              <div className="trip-item-main">
-              <div className="trip-item-label"><strong>{trip.title}</strong>
-              <p className="saving-note">{trip.driver_count} {trip.driver_count === 1 ? 'driver' : 'drivers'} · {trip.passenger_count} {trip.passenger_count === 1 ? 'passenger' : 'passengers'}</p>
-              </div><div className="saving-actions trip-item-actions">
-                <button type="button" className="secondary-button" disabled={!!activeAction}
-                  aria-label={`Load ${trip.title}`} onClick={() => void loadTrip(trip.id)}>
-                  {activeAction?.id === trip.id && activeAction.kind === 'load' ? 'Loading places…' : 'Load trip'}
-                </button>
-                {deleteId === trip.id ? <>
+            <li key={trip.id} className="saving-item location-item">
+              <div className="location-item-main">
+                <div className="location-item-text">
+                  <InlineEdit value={trip.title} label={`Name of trip ${trip.title}`} className="inline-edit-title"
+                    onCommit={(next) => renameTrip(trip, next)} />
+                  <span className="location-item-address">{trip.driver_count} {trip.driver_count === 1 ? 'driver' : 'drivers'} · {trip.passenger_count} {trip.passenger_count === 1 ? 'passenger' : 'passengers'} · {new Date(trip.created_at).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}</span>
+                </div>
+                {deleteId !== trip.id && <div className="location-item-actions">
+                  <button type="button" className="text-button" disabled={!!activeAction}
+                    aria-label={`Open ${trip.title}`} onClick={() => void loadTrip(trip.id)}>
+                    {activeAction?.id === trip.id && activeAction.kind === 'load' ? 'Opening…' : 'Open'}
+                  </button>
+                  <button type="button" className="icon-button delete-icon-button" disabled={!!activeAction}
+                    aria-label={`Delete ${trip.title}`} title="Delete" onClick={() => setDeleteId(trip.id)}>
+                    <svg aria-hidden="true" width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="m4 4 8 8M12 4l-8 8" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" /></svg>
+                  </button>
+                </div>}
+              </div>
+              {deleteId === trip.id && <div className="location-delete-confirm">
+                <p className="saving-note">Delete “{trip.title}”? This cannot be undone.</p>
+                <div className="saving-actions">
                   <button type="button" className="destructive-button" autoFocus disabled={!!activeAction}
                     aria-label={`Confirm delete ${trip.title}`} onClick={() => void removeTrip(trip.id)}>
-                    {activeAction?.id === trip.id && activeAction.kind === 'delete' ? 'Deleting…' : 'Confirm delete'}
+                    {activeAction?.id === trip.id && activeAction.kind === 'delete' ? 'Deleting…' : 'Delete'}
                   </button>
                   <button type="button" className="secondary-button" disabled={!!activeAction} onClick={() => {
                     returnFocus.current = true; setDeleteId(null);
                   }}>Keep trip</button>
-                </> : <button type="button" className="destructive-button" disabled={!!activeAction}
-                  aria-label={`Delete ${trip.title}`} onClick={() => setDeleteId(trip.id)}>Delete</button>}
-              </div>
-              </div>
-              {deleteId === trip.id && <p className="saving-note">Delete this saved trip? This cannot be undone.</p>}
+                </div>
+              </div>}
             </li>
           ))}
         </ul>

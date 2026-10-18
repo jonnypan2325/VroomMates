@@ -4,7 +4,7 @@ import { hasCoordinates, hasPlaceSource } from './places';
 export const newPoint = () => ({
   stop_id: newId(), address: '', label: '', coordinates: { lat: null, lng: null }, source: null,
 });
-export const newDriver = () => ({ ...newPoint(), capacity: 1 });
+export const newDriver = () => ({ ...newPoint(), capacity: 4 });
 export const newPassengerPickup = () => {
   const point = newPoint();
   return { ...point, count: 1, occurrenceIds: [point.stop_id] };

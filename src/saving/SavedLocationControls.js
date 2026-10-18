@@ -1,6 +1,8 @@
 import React, { useEffect, useId, useRef, useState } from 'react';
 import { canonicalText, sameData } from './api';
 import AddressInput from '../components/AddressInput';
+import { resolvePlace } from './places';
+import InlineEdit from './InlineEdit';
 
 function ownerKey(auth) {
   return auth?.status === 'authenticated' && auth.profile?.id
@@ -29,6 +31,7 @@ function messageFor(error) {
     case 'SAVE_IN_PROGRESS': return 'Another location save is in progress. Please wait.';
     case 'INVALID_LOCATION': return 'Use a label of 1–80 characters and choose a location from the address suggestions.';
     case 'INVALID_RESPONSE': return 'The response could not be confirmed. Please retry.';
+    case 'NOT_FOUND': return 'This location was already deleted. Refresh your locations.';
     default: return 'Saved locations are temporarily unavailable. Please retry.';
   }
 }
@@ -56,7 +59,15 @@ function resolvedSelection(point, selection) {
     && Number.isFinite(point?.coordinates?.lng) && Math.abs(point.coordinates.lng) <= 180);
 }
 
-export function SavedLocationControls({ auth, point, saved, onSelect, fieldLabel = 'Location', showPicker = true, renderAddress }) {
+const Chevron = ({ open }) => <svg className={'chevron' + (open ? ' chevron-open' : '')} aria-hidden="true" width="12" height="12"
+  viewBox="0 0 12 12" fill="none"><path d="m3 4.5 3 3 3-3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" /></svg>;
+
+const SavedMark = () => <svg aria-hidden="true" width="14" height="14" viewBox="0 0 14 14">
+  <path d="M3.5 1.75h7a.75.75 0 0 1 .75.75v10l-4.25-2.6-4.25 2.6v-10a.75.75 0 0 1 .75-.75Z" fill="currentColor" /></svg>;
+
+export { Chevron };
+
+export function SavedLocationControls({ auth, point, saved, onSelect, onSaved, fieldLabel = 'Location', showPicker = true, renderAddress }) {
   const { key, scope, current } = useOwnerScope(auth);
   const id = useId();
   const labelInput = useRef(null);
@@ -114,8 +125,9 @@ export function SavedLocationControls({ auth, point, saved, onSelect, fieldLabel
       const row = await saved.save(earlier ? earlier.retryLabel : view.label,
         earlier ? earlier.retrySource : source);
       if (!current(operation)) return;
-      change({ busy: false, error: null, success: `${row.label} saved.`,
+      change({ busy: false, open: false, error: null, success: `${row.label} saved.`,
         confirmed: { label: row.label, source: row.source } });
+      onSaved?.(row);
     } catch (error) {
       if (!current(operation)) return;
       change({ busy: false, error, success: '' });
@@ -152,11 +164,15 @@ export function SavedLocationControls({ auth, point, saved, onSelect, fieldLabel
     try { await saved.refresh(); } catch (_) { /* The shared hook exposes the protected list error. */ }
   };
 
-  const saveButton = <button type="button" className="secondary-button" ref={disclosure} aria-expanded={view.open}
-    aria-controls={view.open ? `${id}-save` : undefined} aria-label={`${view.open ? 'Close save form for' : 'Save location for'} ${fieldLabel}`}
-    disabled={view.busy} onClick={() => change({ open: !view.open })}>
-    {view.open ? 'Close' : 'Save location'}
-  </button>;
+  const savedPlace = Boolean(point?.label && source && saved.locations.some((row) =>
+    row.label === point.label && row.source.place_id === source.place_id));
+  const saveButton = !source && !view.open ? null : savedPlace && !view.open ? <span className="address-saved-mark" role="img"
+    aria-label={`${fieldLabel} is saved as ${point.label}`} title="Saved location"><SavedMark /></span>
+    : <button type="button" className="address-save-toggle" ref={disclosure} aria-expanded={view.open}
+      aria-controls={view.open ? `${id}-save` : undefined} aria-label={`${view.open ? 'Hide save form for' : 'Save location for'} ${fieldLabel}`}
+      disabled={view.busy} onClick={() => change({ open: !view.open })}>
+      Save <Chevron open={view.open} />
+    </button>;
   return <div className={renderAddress ? "location-saving inline-location-saving" : "location-saving"} aria-label={`${fieldLabel} saved locations`} aria-busy={view.busy}>
     {renderAddress && renderAddress(saveButton)}
     {!renderAddress && <div className="saving-row">
@@ -178,12 +194,12 @@ export function SavedLocationControls({ auth, point, saved, onSelect, fieldLabel
       <p>{view.selectError}</p>
       <button type="button" className="secondary-button" disabled={view.busy} onClick={() => selectLocation(view.selectedId)}>Retry selecting location</button>
     </div>}
-    {view.open && <form id={`${id}-save`} onSubmit={(event) => { event.preventDefault(); saveLocation(); }}>
+    {view.open && <form id={`${id}-save`} className="location-save-form" onSubmit={(event) => { event.preventDefault(); saveLocation(); }}
+      onKeyDown={(event) => { if (event.key === 'Escape') { change({ open: false }); disclosure.current?.focus(); } }}>
       <label htmlFor={`${id}-label`}>Your label for {fieldLabel}</label>
       <input id={`${id}-label`} ref={labelInput} type="text" value={view.label} disabled={view.busy}
-        placeholder="e.g. Home or Pickup spot" aria-describedby={`${id}-help`}
+        placeholder="Name this place, e.g. Home"
         onChange={(event) => change({ label: event.target.value, error: null, success: '' })} />
-      <p id={`${id}-help`} className="saving-note">Create label before saving</p>
       <div className="saving-actions">
         <button type="submit" disabled={view.busy || !source || !view.label.trim() || alreadySaved}>
           {view.busy ? 'Working…' : alreadySaved ? 'Location saved' : 'Save location'}
@@ -194,7 +210,7 @@ export function SavedLocationControls({ auth, point, saved, onSelect, fieldLabel
       onRetry={() => saveLocation(true)} />
     {view.error && !view.error.retrySource && view.open && !alreadySaved && <button type="button"
       className="secondary-button" disabled={view.busy || !source || !view.label.trim()} onClick={() => saveLocation()}>Retry saving location</button>}
-    {view.success && <p className="saving-success" role="status">{view.success}</p>}
+    {view.success && <p className={renderAddress ? 'visually-hidden' : 'saving-success'} role="status">{view.success}</p>}
   </div>;
 }
 
@@ -247,13 +263,12 @@ function NewSavedLocationForm({ auth, saved, map, active, onCreated }) {
     <h3>Add location</h3>
     <label htmlFor={id + '-label'}>Label</label>
     <input id={id + '-label'} ref={labelInput} type="text" value={view.label} disabled={view.busy}
-      placeholder="e.g. Home or Friend's pickup"
+      placeholder="Name this place, e.g. Home"
       onChange={(event) => change({ label: event.target.value, error: null, success: '' })} />
     <label>Address</label>
     <AddressInput map={map} value={view.point.address} label="New location address"
       placeholder="Search for an address" disabled={view.busy}
       onChange={(patch) => { if (!lock.current) change({ point: { ...view.point, ...patch }, error: null, success: '' }); }} />
-    <p className="saving-note">Create label before saving</p>
     <div className="saving-actions">
       <button type="submit" disabled={view.busy || !name || !view.point.source || alreadySaved}>
         {view.busy ? 'Saving…' : alreadySaved ? 'Location saved' : 'Save location'}
@@ -264,6 +279,67 @@ function NewSavedLocationForm({ auth, saved, map, active, onCreated }) {
   </form>;
 }
 
+/** Current addresses for saved place IDs, looked up while the list is shown. Only place IDs may be stored, so addresses stay in memory. */
+function usePlaceAddresses(map, locations, active) {
+  const cache = useRef(new Map());
+  const [, setVersion] = useState(0);
+  useEffect(() => {
+    if (!active || !map) return undefined;
+    const store = cache.current;
+    const controller = new AbortController();
+    const pending = [...new Set(locations.map((row) => row.source.place_id))]
+      .filter((placeId) => !store.has(placeId));
+    pending.forEach((placeId) => store.set(placeId, { status: 'loading' }));
+    if (pending.length) setVersion((value) => value + 1);
+    let next = 0;
+    const worker = async () => {
+      while (next < pending.length && !controller.signal.aborted) {
+        const placeId = pending[next++];
+        try {
+          const place = await resolvePlace(map, placeId, { signal: controller.signal });
+          store.set(placeId, { status: 'ready', address: place.address, point: place });
+        } catch (error) {
+          if (error?.name === 'AbortError') { store.delete(placeId); return; }
+          store.set(placeId, { status: 'missing' });
+        }
+        if (!controller.signal.aborted) setVersion((value) => value + 1);
+      }
+    };
+    // A few lookups at a time keeps a long list from flooding the Places service.
+    for (let index = 0; index < Math.min(3, pending.length); index += 1) void worker();
+    return () => {
+      controller.abort();
+      store.forEach((value, placeId) => { if (value.status === 'loading') store.delete(placeId); });
+    };
+  }, [active, map, locations]);
+  return (placeId) => cache.current.get(placeId) || { status: 'loading' };
+}
+
+function InlineAddressEditor({ map, label, initial, commit, cancel }) {
+  const [text, setText] = useState(initial);
+  const done = useRef(false);
+  const blurTimer = useRef(null);
+  const wrap = useRef(null);
+  useEffect(() => {
+    wrap.current?.querySelector('input')?.select();
+    return () => clearTimeout(blurTimer.current);
+  }, []);
+  return <span ref={wrap} className="inline-address-editor" onKeyDown={(event) => {
+    if (event.key === 'Escape') { event.preventDefault(); done.current = true; cancel(); }
+  }}>
+    <AddressInput map={map} value={text} label={label} placeholder="Search for an address" autoFocus
+      onChange={(patch) => {
+        setText(patch.address ?? '');
+        if (patch.source && !done.current) { done.current = true; clearTimeout(blurTimer.current); commit(patch.source); }
+      }}
+      // A suggestion click can blur the field first; give the selection a moment to land.
+      onBlur={() => { blurTimer.current = setTimeout(() => { if (!done.current) { done.current = true; cancel(); } }, 250); }} />
+  </span>;
+}
+
+const DeleteMark = () => <svg aria-hidden="true" width="14" height="14" viewBox="0 0 16 16" fill="none">
+  <path d="m4 4 8 8M12 4l-8 8" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" /></svg>;
+
 export function SavedLocationsPanel({ auth, saved, map, activeView = 'all' }) {
   const { key, scope, current } = useOwnerScope(auth);
   const id = useId();
@@ -272,15 +348,16 @@ export function SavedLocationsPanel({ auth, saved, map, activeView = 'all' }) {
   const visiblePanel = useRef(false);
   const confirmButton = useRef(null);
   const [state, setState] = useState({ key, open: false, confirmId: null, busy: false,
-    error: null, success: '', retryDeleteId: null, creating: false });
+    error: null, success: '', retryDeleteId: null, creating: false, rowError: null });
   const view = state.key === key ? state : { open: false, confirmId: null, busy: false,
-    error: null, success: '', retryDeleteId: null, creating: false };
+    error: null, success: '', retryDeleteId: null, creating: false, rowError: null };
   const change = (next) => {
     if (!current()) return;
     setState((previous) => ({ ...(previous.key === key ? previous : view), key, ...next }));
   };
   const panelVisible = activeView === 'locations' || (activeView === 'all' && view.open);
   visiblePanel.current = panelVisible;
+  const addressFor = usePlaceAddresses(map, saved.locations, Boolean(key) && panelVisible);
   const refreshLocations = saved.refresh;
   useEffect(() => {
     if (key && panelVisible) void refreshLocations().catch(() => {});
@@ -319,6 +396,16 @@ export function SavedLocationsPanel({ auth, saved, map, activeView = 'all' }) {
       if (current(operation)) change({ busy: false, error: failure });
     }
   };
+  const editRow = async (row, label, source) => {
+    change({ rowError: null, success: '', confirmId: null });
+    try {
+      const updated = await saved.edit(row.id, label, source);
+      if (current()) change({ success: label === row.label ? `${updated.label} address updated.` : `Renamed to ${updated.label}.` });
+    } catch (failure) {
+      if (current() && failure?.name !== 'AbortError') change({ rowError: { id: row.id, message: messageFor(failure) } });
+      throw failure;
+    }
+  };
   const error = view.error?.retrySource ? saved.error : view.error || saved.error;
   return <section className="location-saving" aria-label="My locations" aria-busy={view.busy || saved.loading}
     hidden={activeView !== 'all' && activeView !== 'locations'}>
@@ -328,9 +415,9 @@ export function SavedLocationsPanel({ auth, saved, map, activeView = 'all' }) {
     </button> : <h2>My locations{saved.locations.length ? ` (${saved.locations.length})` : ''}</h2>}
     <div id={`${id}-list`} hidden={activeView === 'all' && !view.open}>
       <div className="saving-actions location-manager-actions">
-        <button type="button" className={view.creating ? 'secondary-button' : ''} ref={addButton}
+        <button type="button" className="disclosure-button" ref={addButton}
           aria-expanded={view.creating} onClick={() => change({ creating: !view.creating, success: '' })}>
-          {view.creating ? 'Close form' : 'Add location'}
+          Add location <Chevron open={view.creating} />
         </button>
       </div>
       <NewSavedLocationForm auth={auth} saved={saved} map={map} active={view.creating}
@@ -339,30 +426,48 @@ export function SavedLocationsPanel({ auth, saved, map, activeView = 'all' }) {
           change({ creating: false, error: null, success: row.label + ' saved.' });
           if (visiblePanel.current) addButton.current?.focus();
         }} />
-      {saved.loading && <p className="saving-note" role="status">Loading your saved locations…</p>}
+      {/* Refreshes of a list already on screen stay quiet so the rows do not jump. */}
+      {saved.loading && !saved.locations.length && <p className="saving-note" role="status">Loading your saved locations…</p>}
       {!saved.loading && !saved.locations.length && !error && <p className="saving-note">No saved locations yet. Add your first location.</p>}
       <SaveFailure error={view.creating && !view.error ? null : error} busy={view.busy} prefix="My Locations" onRetry={retryEarlier} />
       {error && !error.retrySource && !view.retryDeleteId && <button type="button" className="secondary-button"
         disabled={saved.loading || view.busy} onClick={refresh}>Retry loading locations</button>}
       <ul className="saving-list">
-        {saved.locations.map((row) => <li key={row.id} className="saving-item">
-          <div className="saving-row"><strong>{row.label}</strong>
-            {view.confirmId !== row.id && <button type="button" className="destructive-button"
-              disabled={view.busy} aria-label={`Delete saved location ${row.label}`} onClick={() => change({
-                confirmId: row.id, error: null, success: '', retryDeleteId: null,
-              })}>Delete</button>}
-          </div>
-          {view.confirmId === row.id && <div>
-            <p className="saving-note">Delete “{row.label}” from your saved locations?</p>
-            <div className="saving-actions">
-              <button type="button" className="destructive-button" ref={confirmButton} disabled={view.busy}
-                onClick={() => remove(row)}>{view.busy ? 'Deleting…' : view.retryDeleteId === row.id ? 'Retry delete' : 'Confirm delete'}</button>
-              <button type="button" className="secondary-button" disabled={view.busy} onClick={() => {
-                change({ confirmId: null, retryDeleteId: null, error: null }); if (visiblePanel.current) addButton.current?.focus();
-              }}>Keep location</button>
+        {saved.locations.map((row) => {
+          const place = addressFor(row.source.place_id);
+          return <li key={row.id} className="saving-item location-item">
+            <div className="location-item-main">
+              <div className="location-item-text">
+                <InlineEdit value={row.label} label={`Name of saved location ${row.label}`} className="inline-edit-title"
+                  maxLength={80} onCommit={(label) => editRow(row, label, row.source)} />
+                <InlineEdit value={place.status === 'ready' ? place.address : place.status === 'missing'
+                  ? 'Address unavailable. Double-click to choose it again.' : 'Looking up address…'}
+                  label={`Address of ${row.label}`}
+                  className={'inline-edit-detail' + (place.status === 'missing' ? ' is-missing' : '')}
+                  onCommit={(source) => editRow(row, row.label, source)}
+                  renderEditor={({ commit, cancel }) => <InlineAddressEditor map={map} label={`New address for ${row.label}`}
+                    initial={place.status === 'ready' ? place.address : ''} commit={commit} cancel={cancel} />} />
+              </div>
+              {view.confirmId !== row.id && <div className="location-item-actions">
+                <button type="button" className="icon-button delete-icon-button" disabled={view.busy}
+                  aria-label={`Delete saved location ${row.label}`} title="Delete" onClick={() => change({
+                    confirmId: row.id, rowError: null, error: null, success: '', retryDeleteId: null,
+                  })}><DeleteMark /></button>
+              </div>}
             </div>
-          </div>}
-        </li>)}
+            {view.rowError?.id === row.id && <p className="saving-error row-error" role="alert">{view.rowError.message}</p>}
+            {view.confirmId === row.id && <div className="location-delete-confirm">
+              <p className="saving-note">Delete “{row.label}” from your saved locations?</p>
+              <div className="saving-actions">
+                <button type="button" className="destructive-button" ref={confirmButton} disabled={view.busy}
+                  onClick={() => remove(row)}>{view.busy ? 'Deleting…' : view.retryDeleteId === row.id ? 'Retry delete' : 'Delete'}</button>
+                <button type="button" className="secondary-button" disabled={view.busy} onClick={() => {
+                  change({ confirmId: null, retryDeleteId: null, error: null }); if (visiblePanel.current) addButton.current?.focus();
+                }}>Keep location</button>
+              </div>
+            </div>}
+          </li>;
+        })}
       </ul>
       {view.success && <p className="saving-success" role="status">{view.success}</p>}
     </div>

@@ -1,11 +1,12 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { hasCoordinates, hasPlaceSource } from '../saving/places';
 
 const invalidPoint = () => ({ coordinates: { lat: null, lng: null }, source: null, label: '' });
 
 /** Google search and an account's saved-place chooser share one address field. */
 export default function AddressInput({ value, placeholder, label, map, onChange, className,
-  disabled = false, savedLocations = [], onSavedSelect, action }) {
+  disabled = false, savedLocations = [], onSavedSelect, action, nickname = '', onBlur, autoFocus = false }) {
   const inputRef = useRef(null);
   const onChangeRef = useRef(onChange);
   onChangeRef.current = onChange;
@@ -13,6 +14,16 @@ export default function AddressInput({ value, placeholder, label, map, onChange,
   const selection = useRef(0);
   const [choosing, setChoosing] = useState(false);
   const [savedError, setSavedError] = useState('');
+  const listId = useId();
+  const [focused, setFocused] = useState(false);
+  const [active, setActive] = useState(-1);
+  const [box, setBox] = useState(null);
+  // A named place shows its nickname over the address until the user chooses to edit it.
+  const [editing, setEditing] = useState(false);
+  const named = Boolean(nickname && value && !editing);
+  useEffect(() => {
+    if (editing) { inputRef.current?.focus(); inputRef.current?.select(); }
+  }, [editing]);
   useEffect(() => {
     live.current = true;
     return () => { live.current = false; selection.current += 1; };
@@ -63,23 +74,68 @@ export default function AddressInput({ value, placeholder, label, map, onChange,
       if (live.current && selection.current === operation) setChoosing(false);
     }
   };
-  const picker = !!onSavedSelect && savedLocations.length > 0;
+  // Saved places lead the suggestions while the field is empty or the text matches a nickname;
+  // once it does not, Google's address suggestions take over.
+  const query = value.trim().toLocaleLowerCase();
+  const matches = onSavedSelect && focused && !named && !disabled && !choosing
+    ? savedLocations.filter((row) => !query || row.label.toLocaleLowerCase().includes(query)).slice(0, 8) : [];
+  const listOpen = matches.length > 0;
+  useLayoutEffect(() => {
+    if (!listOpen) return undefined;
+    const place = () => {
+      const rect = inputRef.current?.parentElement?.getBoundingClientRect();
+      if (rect) setBox({ left: rect.left, top: rect.bottom + 4, width: rect.width });
+    };
+    place();
+    document.body.classList.add('saved-suggestions-open');
+    window.addEventListener('resize', place);
+    window.addEventListener('scroll', place, true);
+    return () => {
+      document.body.classList.remove('saved-suggestions-open');
+      window.removeEventListener('resize', place);
+      window.removeEventListener('scroll', place, true);
+    };
+  }, [listOpen]);
+  useEffect(() => { setActive(-1); }, [query, listOpen]);
+  const keyDown = (event) => {
+    if (!listOpen) return;
+    if (event.key === 'ArrowDown') { event.preventDefault(); setActive((index) => (index + 1) % matches.length); }
+    else if (event.key === 'ArrowUp') { event.preventDefault(); setActive((index) => (index <= 0 ? matches.length : index) - 1); }
+    else if (event.key === 'Enter' && active >= 0) { event.preventDefault(); void chooseSaved(matches[active].id); }
+    else if (event.key === 'Escape') { event.preventDefault(); setFocused(false); }
+  };
   return <div className="address-field" aria-busy={choosing}>
-    <div className={'address-input-wrap' + (picker ? ' has-saved-places' : '') + (action ? ' has-address-action' : '')}>
-      <input ref={inputRef} type="text" className={className} value={value} disabled={disabled}
-        aria-label={label} placeholder={placeholder} autoComplete="off"
+    <div className={'address-input-wrap' + (action ? ' has-address-action' : '')}>
+      {named && <button type="button" className="address-named" disabled={disabled} title={nickname + '\n' + value}
+        aria-label={label + ': ' + nickname + ', ' + value + '. Change address'} onClick={() => setEditing(true)}>
+        <span className="address-named-label">{nickname}</span>
+        <span className="address-named-address">{value}</span>
+      </button>}
+      <input ref={inputRef} type="text" className={className} value={value} disabled={disabled} hidden={named}
+        aria-label={label} placeholder={placeholder} autoComplete="off" autoFocus={autoFocus} title={value || undefined}
+        role={onSavedSelect ? 'combobox' : undefined} aria-autocomplete={onSavedSelect ? 'list' : undefined}
+        aria-expanded={onSavedSelect ? listOpen : undefined} aria-controls={listOpen ? listId : undefined}
+        aria-activedescendant={listOpen && active >= 0 ? `${listId}-${active}` : undefined}
+        onFocus={() => setFocused(true)} onKeyDown={keyDown}
+        onBlur={() => { setFocused(false); setEditing(false); onBlur?.(); }}
         onChange={(event) => {
           selection.current += 1; setChoosing(false); setSavedError('');
           onChangeRef.current({ address: event.target.value, ...invalidPoint() });
         }} />
+      {choosing && <span className="address-loading" role="status">Loading saved place…</span>}
       {action && <div className="address-action">{action}</div>}
-      {picker && <select className="address-saved-chooser" value="" disabled={disabled || choosing}
-        aria-label={'Choose saved location for ' + label}
-        onChange={(event) => void chooseSaved(event.target.value)}>
-        <option value="">{choosing ? 'Loading…' : 'Saved'}</option>
-        {savedLocations.map((row) => <option key={row.id} value={row.id}>{row.label}</option>)}
-      </select>}
     </div>
+    {listOpen && box && createPortal(<ul id={listId} role="listbox" aria-label={'Saved places for ' + label}
+      className="saved-suggestions" style={{ left: box.left, top: box.top, width: box.width }}>
+      <li className="saved-suggestions-heading" role="presentation">Saved places</li>
+      {matches.map((row, index) => <li key={row.id} id={`${listId}-${index}`} role="option" aria-selected={index === active}
+        className={index === active ? 'is-active' : undefined} onMouseEnter={() => setActive(index)}
+        onMouseDown={(event) => { event.preventDefault(); void chooseSaved(row.id); }}>
+        <svg aria-hidden="true" width="12" height="12" viewBox="0 0 14 14"><path d="M3.5 1.75h7a.75.75 0 0 1 .75.75v10l-4.25-2.6-4.25 2.6v-10a.75.75 0 0 1 .75-.75Z" fill="currentColor" /></svg>
+        <span>{row.label}</span>
+      </li>)}
+    </ul>, document.body)}
+
     {savedError && <p className="saving-error" role="alert">{savedError}</p>}
   </div>;
 }

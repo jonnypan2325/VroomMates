@@ -1,7 +1,7 @@
 import React from 'react';
 import './App.css';
 import LocationInput from './LocationInput';
-import GoogleAccount from './components/GoogleAccount';
+import GoogleAccount, { GoogleAccountNotice } from './components/GoogleAccount';
 import useMediaQuery, { MOBILE_QUERY } from './hooks/useMediaQuery';
 import useGoogleMap from './hooks/useGoogleMap';
 import useGoogleProfile from './hooks/useGoogleProfile';
@@ -23,21 +23,18 @@ function App() {
       <div className="sidebar">
         <div className="sidebar-card">
           <header className="sidebar-header">
-          <h1 className="brand-title">VroomMates</h1>
-          <p className="brand-subtitle">
-            Enter locations for drivers, passengers, and destination:
-          </p>
-
+            <div className="brand-row">
+              <h1 className="brand-title">VroomMates</h1>
+              <GoogleAccount auth={auth} />
+            </div>
+            <GoogleAccountNotice auth={auth} />
           </header>
 
           <LocationInput
             map={map}
             directionsRenderer={directionsRenderer}
             auth={auth}
-            accountControls={<GoogleAccount auth={auth} />}
           />
-
-
         </div>
       </div>
 

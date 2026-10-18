@@ -21,7 +21,8 @@ function recordFrom(body) {
     if (body?.status !== 'success' || !row || !sameData(Object.keys(row).sort(), RECORD_KEYS)
         || !UUID.test(row.id) || row.schema_version !== 1 || row.resolution_required !== true
         || !STAMP.test(row.created_at) || !Number.isFinite(Date.parse(row.created_at))
-        || row.updated_at !== row.created_at || canonicalText(row.label, 80, 320) !== row.label) throw new Error();
+        || !STAMP.test(row.updated_at) || !(Date.parse(row.updated_at) >= Date.parse(row.created_at))
+        || canonicalText(row.label, 80, 320) !== row.label) throw new Error();
     const source = sourceReference(row.source);
     return Object.freeze({ id: row.id, label: row.label, source, schema_version: 1,
       created_at: row.created_at, updated_at: row.updated_at, resolution_required: true });
@@ -235,6 +236,32 @@ export default function useSavedLocations(auth) {
     }
   }, [current, refresh, run, scope, update]);
 
+  // PATCH replaces named fields with the same body each time, so an explicit retry is safe.
+  const edit = useCallback(async (id, label, source) => {
+    if (!current()) throw aborted();
+    if (!UUID.test(id)) throw new SavedApiError(400, 'INVALID_LOCATION', 'Choose a saved location to edit.');
+    const existing = state.locations.find((row) => row.id === id);
+    let body;
+    try {
+      const next = { label: canonicalText(label, 80, 320), source: sourceReference(source) };
+      body = {};
+      if (!existing || next.label !== existing.label) body.label = next.label;
+      if (!existing || !sameData(next.source, existing.source)) body.source = next.source;
+    } catch (error) {
+      throw error instanceof SavedApiError ? error
+        : new SavedApiError(400, 'INVALID_LOCATION', 'Enter a label of 1–80 characters (up to 320 UTF-8 bytes).');
+    }
+    if (!Object.keys(body).length) return existing;
+    const row = recordFrom(await run(`/saved-locations/${id}`, { method: 'PATCH', body }));
+    if (row.id !== id || (body.label && row.label !== body.label) || (body.source && !sameData(row.source, body.source))) {
+      throw new SavedApiError(503, 'INVALID_RESPONSE', 'The change could not be confirmed. Please retry.');
+    }
+    if (!current()) throw aborted();
+    remember(row);
+    void refresh().catch(() => {});
+    return row;
+  }, [current, refresh, remember, run, state.locations]);
+
   const visible = state.key === key && owner ? state : { locations: [], loading: Boolean(owner), error: null };
-  return { locations: visible.locations, loading: visible.loading, error: visible.error, refresh, save, remove };
+  return { locations: visible.locations, loading: visible.loading, error: visible.error, refresh, save, remove, edit };
 }

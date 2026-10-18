@@ -3,7 +3,8 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 // Wide layout: the divider sets the sidebar's width.
 const MIN_SIDEBAR_PERCENT = 22;
 const MAX_SIDEBAR_PERCENT = 60;
-const DEFAULT_SIDEBAR_PERCENT = 32;
+const DEFAULT_SIDEBAR_PERCENT = 38;
+const SIDEBAR_STORAGE_KEY = 'vroommates.sidebarWidth';
 
 // Stacked layout: the divider sets the map's height instead.
 const MIN_MAP_PERCENT = 25;
@@ -11,6 +12,14 @@ const MAX_MAP_PERCENT = 78;
 const DEFAULT_MAP_PERCENT = 45;
 
 const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
+
+// The dragged width is a per-browser convenience; storage may be unavailable.
+function storedSidebarWidth() {
+  try {
+    const value = Number(window.localStorage.getItem(SIDEBAR_STORAGE_KEY));
+    return value ? clamp(value, MIN_SIDEBAR_PERCENT, MAX_SIDEBAR_PERCENT) : DEFAULT_SIDEBAR_PERCENT;
+  } catch (_) { return DEFAULT_SIDEBAR_PERCENT; }
+}
 
 /**
  * Drives the draggable divider between the form panel and the map.
@@ -23,7 +32,7 @@ const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
  * properties, so each layout's stylesheet rules pick the one that applies.
  */
 export default function useResizablePanels(isStacked) {
-  const [sidebarWidth, setSidebarWidth] = useState(DEFAULT_SIDEBAR_PERCENT);
+  const [sidebarWidth, setSidebarWidth] = useState(storedSidebarWidth);
   const [mapHeight, setMapHeight] = useState(DEFAULT_MAP_PERCENT);
 
   const containerRef = useRef(null);
@@ -51,9 +60,14 @@ export default function useResizablePanels(isStacked) {
     [isStacked]
   );
 
+  const latestWidth = useRef(sidebarWidth);
+  latestWidth.current = sidebarWidth;
+
   const stopResizing = useCallback(() => {
     if (!isDragging.current) return;
     isDragging.current = false;
+    try { window.localStorage.setItem(SIDEBAR_STORAGE_KEY, String(Math.round(latestWidth.current * 10) / 10)); }
+    catch (_) { /* The width still applies for this visit. */ }
     document.body.style.cursor = '';
     document.body.style.userSelect = '';
   }, []);

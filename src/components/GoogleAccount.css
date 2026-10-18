@@ -1,7 +1,35 @@
-.google-account { margin-bottom: 20px; }
-.google-signin { max-width: 100%; }
-.google-account .google-retry-actions { margin-top: 16px; }
-.google-account .account-note { margin: 8px 0 0; font-size: 0.75rem; line-height: 1.5; }
-.google-account .account-error { margin: 10px 0 0; padding: 10px 12px; color: var(--danger); background: var(--danger-bg); border: 1px solid var(--danger-border); border-radius: var(--radius); font-size: 0.85rem; line-height: 1.5; }
-.google-account .google-btn { min-height: 44px; }
-.google-account .google-btn:focus-visible { outline: 2px solid var(--accent-dark); outline-offset: 3px; }
+.account-signin { display: flex; align-items: center; gap: 10px; min-height: 44px; }
+.account-signin-hint { max-width: 5.5em; color: var(--ink-soft); font-size: .78rem; font-weight: 500; line-height: 1.2; text-align: right; }
+.account-circle.account-google { background: var(--surface); border-color: var(--border); }
+.account-circle.account-google:hover:not(:disabled) { background: var(--accent-wash); border-color: var(--accent-border-strong); }
+.account-circle.account-google:disabled { opacity: .55; cursor: wait; }
+
+.account-menu { position: relative; }
+.account-circle { display: grid; place-items: center; width: 40px; height: 40px; min-height: 40px; margin: 0; padding: 0;
+  border-radius: 50%; border: 1px solid var(--accent-border); background: var(--accent-light); color: var(--accent-ink);
+  font-size: 1rem; font-weight: 650; line-height: 1; box-shadow: none; cursor: pointer;
+  transition: background-color .15s ease-out, border-color .15s ease-out; }
+.account-circle:hover, .account-circle[aria-expanded='true'] { background: var(--accent-light-hover); border-color: var(--accent-border-strong); }
+.account-circle:focus-visible { outline: 2px solid var(--accent-dark); outline-offset: 3px; }
+.account-verifying { cursor: default; }
+.account-spinner { width: 16px; height: 16px; border-radius: 50%; border: 2px solid var(--accent-border-strong); border-top-color: var(--accent-dark);
+  animation: account-spin .8s linear infinite; }
+@keyframes account-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .account-spinner { animation-duration: 2.4s; } }
+
+.account-panel { position: absolute; z-index: 20; top: calc(100% + 8px); right: 0; width: max-content; min-width: 210px;
+  max-width: min(280px, calc(100vw - 32px)); padding: 14px 16px 16px; background: var(--surface);
+  border: 1px solid var(--border); border-radius: 10px;
+  box-shadow: var(--shadow-raised); }
+.account-panel[hidden] { display: none; }
+.account-panel .account-greeting { margin: 0; color: var(--ink); font-size: .95rem; font-weight: 600; }
+.account-panel .account-note { margin: 6px 0 14px; color: var(--ink-soft); font-size: .78rem; line-height: 1.45; }
+.account-panel .account-logout { width: 100%; min-height: 40px; margin: 0; }
+
+.account-notice { margin: 10px 0 0; padding: 10px 12px; color: var(--danger); background: var(--danger-bg);
+  border: 1px solid var(--danger-border); border-radius: var(--radius); font-size: .85rem; line-height: 1.5; }
+.account-notice p { margin: 0; }
+.account-notice button { margin: 10px 0 0; min-height: 40px; }
+
+@media (pointer: coarse) { .account-circle { width: var(--tap-target); height: var(--tap-target); min-height: var(--tap-target); } }
+@media (max-width: 420px) { .account-signin-hint { display: none; } }
