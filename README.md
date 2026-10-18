@@ -121,9 +121,10 @@ UI will load but route optimization requests will fail.
 4. If prompted, configure the OAuth consent screen first (External, just fill in the required fields).
 5. Choose **Web application** as the application type.
 6. Under **Authorized JavaScript origins**, add `http://localhost:3000`.
-7. The popup callback sign-in flow does not require a redirect URI; do not add the API probe as a Google redirect URI.
+7. The sign-in popup returns a one-time code to the page, so no redirect URI is needed; do not add the API as a Google redirect URI.
 8. Copy the generated **Client ID** and paste it into `.env` as
    `REACT_APP_GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_ID`. The frontend and server must use the same web client ID. Missing `GOOGLE_CLIENT_ID` fails backend startup.
+9. Copy the client's **Client secret** into `.env` as `GOOGLE_CLIENT_SECRET` (server only, never `REACT_APP_`). The API's `POST /auth/google-code` uses it to swap the popup's code for an ID token; without it, sign-in reports that it is temporarily unavailable.
 
 ### Google Maps API key (`REACT_APP_GOOGLE_MAPS_API_KEY`)
 

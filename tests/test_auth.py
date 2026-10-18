@@ -21,6 +21,7 @@ from backend.auth import BoundedCertificateRequest, GoogleIdentityVerifier, Inva
 
 NOW = 1900000000
 AUDIENCE = 'synthetic-test-client.apps.googleusercontent.com'
+CODE_ORIGIN = 'https://synthetic.example'
 
 
 def b64(value):
@@ -43,6 +44,20 @@ class CertificateTransport:
         if not self.available:
             raise exceptions.TransportError('synthetic outage')
         return type('Response', (), {'status': 200, 'data': json.dumps(self.certificates).encode()})()
+
+
+class TokenEndpoint:
+    """Synthetic stand-in for Google's token endpoint; records requests, never calls out."""
+    def __init__(self, status=200, body=None):
+        self.status, self.body, self.calls = status, body, []
+
+    def __call__(self, url, data=None, timeout=None, allow_redirects=True):
+        self.calls.append({'url': url, 'data': data, 'timeout': timeout, 'allow_redirects': allow_redirects})
+        if isinstance(self.status, Exception):
+            raise self.status
+        body = self.body
+        return type('Response', (), {'status_code': self.status,
+                                     'json': lambda _self: body() if callable(body) else body})()
 
 
 class AuthTests(unittest.TestCase):
@@ -264,3 +279,105 @@ class AuthTests(unittest.TestCase):
             from backend.auth import VerificationUnavailable
             with self.assertRaises(VerificationUnavailable):
                 verifier.verify(self.token(header={'alg': 'RS256', 'kid': 'rotated-key'}))
+
+    def use_code_exchange(self):
+        self.endpoint = TokenEndpoint(body={'id_token': self.token(claims(given_name='Fixture')),
+                                            'access_token': 'synthetic-access', 'token_type': 'Bearer'})
+        self.app = create_app({'TESTING': True, 'GOOGLE_CLIENT_ID': AUDIENCE,
+                               'GOOGLE_CLIENT_SECRET': 'synthetic-secret',
+                               'GOOGLE_TOKEN_REQUEST': self.endpoint,
+                               'GOOGLE_CERTIFICATE_REQUEST': self.transport,
+                               'AUTH_CLOCK': lambda: self.clock,
+                               'CORS_ALLOWED_ORIGINS': ['http://localhost:3000', CODE_ORIGIN]})
+        self.client = self.app.test_client()
+
+    def exchange(self, body=None, headers=None):
+        if not hasattr(self, 'endpoint'):
+            self.use_code_exchange()
+        headers = {'Origin': CODE_ORIGIN, 'X-Requested-With': 'XmlHttpRequest', **(headers or {})}
+        return self.client.post('/auth/google-code', json={'code': '4/synthetic-code'} if body is None else body,
+                                headers={k: v for k, v in headers.items() if v is not None})
+
+    def test_exchanges_code_for_a_verified_id_token(self):
+        self.use_code_exchange()
+        response = self.exchange()
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json, {'status': 'success', 'credential': self.endpoint.body['id_token']})
+        self.assertEqual(response.headers['Cache-Control'], 'no-store')
+        self.assertEqual(response.headers['Access-Control-Allow-Origin'], CODE_ORIGIN)
+        [call] = self.endpoint.calls
+        self.assertEqual(call['url'], 'https://oauth2.googleapis.com/token')
+        self.assertEqual(call['data'], {'code': '4/synthetic-code', 'client_id': AUDIENCE,
+                                        'client_secret': 'synthetic-secret', 'redirect_uri': CODE_ORIGIN,
+                                        'grant_type': 'authorization_code'})
+        self.assertFalse(call['allow_redirects'])
+        self.assertLessEqual(call['timeout'], 10)
+        verified = self.probe(response.json['credential'])
+        self.assertEqual(verified.json['user'], {'id': 'google:synthetic-account-a', 'given_name': 'Fixture'})
+
+    def test_rejects_requests_without_popup_markers_or_allowed_origin(self):
+        self.use_code_exchange()
+        cases = [
+            self.exchange(headers={'X-Requested-With': None}),
+            self.exchange(headers={'X-Requested-With': 'fetch'}),
+            self.exchange(headers={'Origin': None}),
+            self.exchange(headers={'Origin': 'https://synthetic.example.attacker.invalid'}),
+            self.exchange(body={}),
+            self.exchange(body={'code': ''}),
+            self.exchange(body={'code': 7}),
+            self.exchange(body={'code': 'x' * 2049}),
+            self.exchange(body={'code': 'bad code'}),
+            self.exchange(body={'code': '4/a', 'redirect_uri': 'https://attacker.invalid'}),
+            self.exchange(body=['4/a']),
+            self.client.post('/auth/google-code?code=4/a', json={'code': '4/a'},
+                             headers={'Origin': CODE_ORIGIN, 'X-Requested-With': 'XmlHttpRequest'}),
+            self.client.post('/auth/google-code', data='code=4/a',
+                             headers={'Origin': CODE_ORIGIN, 'X-Requested-With': 'XmlHttpRequest',
+                                      'Content-Type': 'application/x-www-form-urlencoded'}),
+        ]
+        for response in cases:
+            self.assert_error(response, 400, 'INVALID_AUTH_REQUEST')
+        self.assertEqual(self.endpoint.calls, [])
+        self.assertEqual(self.exchange(headers={'X-Requested-With': 'XMLHttpRequest'}).status_code, 200)
+
+    def test_google_rejection_or_unverifiable_token_is_invalid_credential(self):
+        self.use_code_exchange()
+        for status, body in [(400, {'error': 'invalid_grant'}), (200, {'access_token': 'only'}),
+                             (200, {'id_token': 'not-a-jwt'}), (200, ['id_token'])]:
+            self.endpoint.status, self.endpoint.body = status, body
+            self.assert_error(self.exchange(), 401, 'INVALID_CREDENTIAL')
+        self.endpoint.status, self.endpoint.body = 200, {'id_token': self.token(claims(aud='other-client'))}
+        self.assert_error(self.exchange(), 401, 'INVALID_CREDENTIAL')
+
+    def test_configuration_and_outages_are_unavailable_not_invalid(self):
+        self.use_code_exchange()
+        def bad_json():
+            raise ValueError('not json')
+        cases = [(400, {'error': 'redirect_uri_mismatch'}), (401, {'error': 'invalid_client'}),
+                 (500, {}), (200, bad_json), (requests.ConnectionError('synthetic'), None)]
+        with patch.object(self.app.logger, 'warning') as warning:
+            for status, body in cases:
+                self.endpoint.status, self.endpoint.body = status, body
+                self.assert_error(self.exchange(), 503, 'AUTH_UNAVAILABLE')
+        logged = ' '.join(str(arg) for call in warning.call_args_list for arg in call.args)
+        self.assertIn('redirect_uri_mismatch', logged)
+        self.assertIn('invalid_client', logged)
+        self.assertNotIn('synthetic-secret', logged)
+        self.assertNotIn('4/synthetic-code', logged)
+
+    def test_missing_secret_answers_unavailable_without_calling_google(self):
+        self.use_code_exchange()
+        app = create_app({'GOOGLE_CLIENT_ID': AUDIENCE, 'GOOGLE_CLIENT_SECRET': None, 'GOOGLE_TOKEN_REQUEST': self.endpoint,
+                          'CORS_ALLOWED_ORIGINS': [CODE_ORIGIN]})
+        response = app.test_client().post('/auth/google-code', json={'code': '4/a'},
+                                          headers={'Origin': CODE_ORIGIN, 'X-Requested-With': 'XmlHttpRequest'})
+        self.assert_error(response, 503, 'AUTH_UNAVAILABLE')
+        self.assertEqual(self.endpoint.calls, [])
+
+    def test_preflight_allows_the_popup_marker_header(self):
+        self.use_code_exchange()
+        response = self.client.options('/auth/google-code', headers={
+            'Origin': CODE_ORIGIN, 'Access-Control-Request-Method': 'POST',
+            'Access-Control-Request-Headers': 'content-type,x-requested-with'})
+        self.assertEqual(response.headers['Access-Control-Allow-Origin'], CODE_ORIGIN)
+        self.assertIn('x-requested-with', response.headers['Access-Control-Allow-Headers'].lower())

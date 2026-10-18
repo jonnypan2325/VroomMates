@@ -140,6 +140,42 @@ class GoogleIdentityVerifier:
                          name if isinstance(name, str) and name.strip() else None)
 
 
+GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
+
+
+class GoogleCodeExchange:
+    """Swap a one-time popup code for Google's ID token; callers still verify it."""
+    def __init__(self, client_id, client_secret, token_request=None, timeout=5.0):
+        self.client_id = client_id
+        self.client_secret = client_secret
+        self.token_request = token_request or requests.post
+        self.timeout = timeout
+
+    def exchange(self, code, redirect_uri):
+        if not self.client_secret:
+            raise VerificationUnavailable()
+        try:
+            response = self.token_request(GOOGLE_TOKEN_URL, data={
+                "code": code, "client_id": self.client_id, "client_secret": self.client_secret,
+                "redirect_uri": redirect_uri, "grant_type": "authorization_code",
+            }, timeout=self.timeout, allow_redirects=False)
+            body = response.json()
+        except (requests.RequestException, ValueError):
+            raise VerificationUnavailable() from None
+        error = body.get("error") if isinstance(body, dict) else None
+        if response.status_code == 400 and error == "invalid_grant":
+            raise InvalidCredential()
+        if response.status_code != 200:
+            # Google's error code is safe to log and is the only clue to a misconfigured client.
+            current_app.logger.warning("Google code exchange failed: %s",
+                                       error if isinstance(error, str) else response.status_code)
+            raise VerificationUnavailable()
+        credential = body.get("id_token") if isinstance(body, dict) else None
+        if not isinstance(credential, str) or not credential:
+            raise InvalidCredential()
+        return credential
+
+
 def auth_error(status, code, message):
     response = jsonify(error=message, code=code)
     response.status_code = status
