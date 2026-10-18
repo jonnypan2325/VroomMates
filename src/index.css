@@ -13,6 +13,7 @@ body {
   -moz-osx-font-smoothing: grayscale;
   /* the app manages its own scrolling regions */
   overscroll-behavior: none;
+  background: var(--bg); /* matches the app shell, so no gap can show white */
   -webkit-text-size-adjust: 100%;
 }
 

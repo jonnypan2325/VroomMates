@@ -213,8 +213,10 @@ body.saved-suggestions-open .pac-container { display: none !important; }
 .submit-btn.is-unavailable { opacity: .55; cursor: not-allowed; }
 .submit-btn.is-unavailable:hover { background: var(--accent); }
 .calculate-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 44px; margin-top: 4px; }
-.calculate-row .saving-note { margin: 0; min-width: 0; }
+.calculate-row .saving-note { flex: 1 1 auto; margin: 0; min-width: 0; }
 .calculate-row .text-button { margin-left: auto; flex: 0 0 auto; }
+/* Small text actions keep their own width where the mobile layout widens buttons. */
+.text-button { width: auto; }
 /* Loading a saved place happens inside the field, so the row keeps its height. */
 .address-loading { position: absolute; inset: 1px; z-index: 1; display: flex; align-items: center; padding: 0 10px;
   border-radius: var(--radius); background: var(--accent-wash); color: var(--ink-soft); font-size: .85rem; pointer-events: none; }

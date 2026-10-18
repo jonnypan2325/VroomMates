@@ -46,9 +46,10 @@
    ========================================================================== */
 
 .app-shell {
+  /* Pinned to the viewport: after the iOS keyboard closes, the page itself has nothing to scroll. */
+  position: fixed;
+  inset: 0;
   display: flex;
-  height: 100vh;
-  height: 100dvh; /* survives the collapsing browser chrome on mobile */
   background: var(--bg);
   overflow: clip;
 }
