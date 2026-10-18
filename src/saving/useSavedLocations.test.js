@@ -190,3 +190,59 @@ it('account and generation switches discard old writes and unresolved attempt me
   await waitFor(() => expect(result.current.loading).toBe(false));
   expect(result.current.error).toBeNull();
 });
+
+const edited = (changes) => response({ status: 'success', location: { ...row(), updated_at: '2026-10-07T09:30:00Z', ...changes } });
+
+it('edit patches only the changed fields and accepts a record updated after creation', async () => {
+  const moved = { kind: 'google_places', place_id: 'synthetic-moved' };
+  const request = jest.fn().mockResolvedValueOnce(list(row()))
+    .mockResolvedValueOnce(edited({ label: 'Home base' })).mockResolvedValueOnce(list(row(A, 'Home base')))
+    .mockResolvedValueOnce(edited({ label: 'Home base', source: moved })).mockResolvedValueOnce(list(row(A, 'Home base', moved)));
+  const { result } = await mount(request);
+  const renamed = await invoke(() => result.current.edit(A, ' Home base ', source));
+  expect(renamed.error).toBeUndefined();
+  expect(renamed.value).toMatchObject({ id: A, label: 'Home base', updated_at: '2026-10-07T09:30:00Z' });
+  expect(request.mock.calls[1][0]).toBe(`/saved-locations/${A}`);
+  expect(request.mock.calls[1][1].method).toBe('PATCH');
+  expect(JSON.parse(request.mock.calls[1][1].body)).toEqual({ label: 'Home base' });
+  const relocated = await invoke(() => result.current.edit(A, 'Home base', moved));
+  expect(relocated.error).toBeUndefined();
+  expect(JSON.parse(request.mock.calls[3][1].body)).toEqual({ source: moved });
+  expect(result.current.locations).toEqual([row(A, 'Home base', moved)]);
+  const unchanged = await invoke(() => result.current.edit(A, 'Home base', moved));
+  expect(unchanged.value).toEqual(row(A, 'Home base', moved));
+  expect(request).toHaveBeenCalledTimes(5);
+});
+
+it.each([
+  ['updated before it was created', { label: 'Home base', updated_at: '2026-10-05T12:00:00Z' }],
+  ['a label other than the one sent', { label: 'Someone else' }],
+  ['provider data in the record', { label: 'Home base', address: 'private provider address' }],
+])('edit rejects a record %s and keeps the stored row', async (_, changes) => {
+  const request = jest.fn().mockResolvedValueOnce(list(row())).mockResolvedValueOnce(edited(changes));
+  const { result } = await mount(request);
+  expect((await invoke(() => result.current.edit(A, 'Home base', source))).error.code).toBe('INVALID_RESPONSE');
+  expect(result.current.locations).toEqual([row()]);
+  expect(request).toHaveBeenCalledTimes(2);
+});
+
+it('edit validates before sending and an edit from a previous account is aborted without a request', async () => {
+  const pending = deferred();
+  const request = jest.fn().mockResolvedValueOnce(list(row())).mockReturnValueOnce(pending.promise);
+  const { result, rerender } = await mount(request);
+  expect((await invoke(() => result.current.edit(A, '', source))).error.code).toBe('INVALID_LOCATION');
+  expect((await invoke(() => result.current.edit(A, 'Home', { ...source, address: 'provider text' }))).error.code).toBe('INVALID_LOCATION');
+  expect((await invoke(() => result.current.edit('not-a-uuid', 'Home', source))).error.code).toBe('INVALID_LOCATION');
+  expect(request).toHaveBeenCalledTimes(1);
+  const oldEdit = result.current.edit;
+  let editing;
+  act(() => { editing = oldEdit(A, 'Home base', source).catch((error) => error); });
+  const signal = request.mock.calls[1][1].signal;
+  const requestB = jest.fn().mockResolvedValue(list(row(B, 'Second')));
+  rerender({ account: owner(requestB, 'google:synthetic-b', 2) });
+  expect(signal.aborted).toBe(true);
+  await act(async () => { pending.resolve(edited({ label: 'Home base' })); expect((await editing).name).toBe('AbortError'); });
+  await waitFor(() => expect(result.current.locations).toEqual([row(B, 'Second')]));
+  expect((await invoke(() => oldEdit(A, 'Again', source))).error.name).toBe('AbortError');
+  expect(requestB.mock.calls.every(([, options]) => options.method === 'GET')).toBe(true);
+});

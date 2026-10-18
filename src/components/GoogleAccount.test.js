@@ -1,7 +1,7 @@
 import React from 'react';
 import { act, fireEvent, render, screen, renderHook } from '@testing-library/react';
 import { googleLogout } from '@react-oauth/google';
-import GoogleAccount from './GoogleAccount';
+import GoogleAccount, { GoogleAccountNotice } from './GoogleAccount';
 import useGoogleProfile from '../hooks/useGoogleProfile';
 
 // Like the installed hook, callbacks are read from the latest render, so a popup
@@ -26,7 +26,11 @@ const reply = (status, body) => ({ ok: status >= 200 && status < 300, status, js
 const exchanged = (credential = 'synthetic-proof-a') => reply(200, { status: 'success', credential });
 const successResponse = (name = 'Fixture', expiry = NOW / 1000 + 3600, subject = 'synthetic-fixture') =>
   reply(200, { status: 'success', user: { id: `google:${subject}`, ...(name ? { given_name: name } : {}) }, expires_at: expiry });
-function AccountHarness() { return <GoogleAccount auth={useGoogleProfile()} />; }
+// The header circle and the notice under it share one auth object, as in App.
+function AccountHarness() {
+  const auth = useGoogleProfile();
+  return <><GoogleAccount auth={auth} /><GoogleAccountNotice auth={auth} /></>;
+}
 let originalFetch;
 beforeEach(() => {
   jest.useFakeTimers('modern');
@@ -50,10 +54,18 @@ const signIn = async (verify = successResponse(), credential = 'synthetic-proof-
   global.fetch.mockResolvedValueOnce(exchanged(credential)).mockResolvedValueOnce(verify);
   await popupReturns();
 };
+// The greeting and Log out live in the account panel, which opens from the initial circle.
+const openAccount = (name = /^Account/) => fireEvent.click(screen.getByRole('button', { name }));
+// jsdom has no PointerEvent, so the pointer type React reads is set on a plain event.
+const pointer = (element, type, pointerType = 'mouse') => {
+  const event = new MouseEvent(type, { bubbles: true });
+  Object.defineProperty(event, 'pointerType', { value: pointerType });
+  act(() => { element.dispatchEvent(event); });
+};
 
 it('opens the Google code popup and only greets after server verification', async () => {
   render(<AccountHarness />);
-  expect(screen.getByText('Sign in to save your routes and locations.')).toBeVisible();
+  expect(screen.getByText('Sign in to save')).toBeVisible();
   expect(mockGoogle.options.flow).toBe('auth-code');
   fireEvent.click(screen.getByRole('button', { name: 'Sign in with Google' }));
   expect(mockGoogle.popups).toBe(1);
@@ -65,11 +77,18 @@ it('opens the Google code popup and only greets after server verification', asyn
   await act(async () => { for (let tick = 0; tick < 5; tick += 1) await Promise.resolve(); });
   expect(global.fetch).toHaveBeenCalledTimes(2);
   expect(global.fetch.mock.calls[0][0]).toMatch(/\/auth\/google-code$/);
-  expect(screen.getByRole('status')).toHaveTextContent('Verifying your sign-in');
-  expect(screen.getByRole('region', { name: 'Google account' })).toHaveAttribute('aria-busy', 'true');
+  expect(screen.getByRole('status', { name: 'Verifying your sign-in' })).toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'Sign in with Google' })).not.toBeInTheDocument();
   expect(screen.queryByRole('button', { name: 'Cancel' })).not.toBeInTheDocument();
+  expect(screen.queryByRole('alert')).not.toBeInTheDocument();
   expect(screen.queryByText('Hello, Fixture')).not.toBeInTheDocument();
   await act(async () => { pending.resolve(successResponse()); await signing; });
+  const account = screen.getByRole('button', { name: 'Account: Fixture' });
+  expect(account).toHaveTextContent(/^F$/);
+  expect(account).toHaveAttribute('aria-expanded', 'false');
+  expect(screen.getByText('Hello, Fixture')).not.toBeVisible();
+  openAccount();
+  expect(account).toHaveAttribute('aria-expanded', 'true');
   expect(screen.getByText('Hello, Fixture')).toBeVisible();
   expect(screen.getByRole('button', { name: 'Log out' })).toBeVisible();
   expect(screen.getByText('Signed in for this tab. Refreshing requires sign-in again.')).toBeVisible();
@@ -116,9 +135,13 @@ it('temporary verification outage shows explicit retry and preserves the reviewe
   await signIn(reply(503));
   expect(screen.getByRole('alert')).toHaveTextContent('temporarily unavailable');
   expect(screen.queryByRole('button', { name: 'Cancel' })).not.toBeInTheDocument();
-  expect(screen.queryByRole('button', { name: 'Log out' })).not.toBeInTheDocument();
+  // Log out sits in a closed panel, so absence of the account circle is the meaningful check.
+  expect(screen.queryByRole('button', { name: /^Account/ })).not.toBeInTheDocument();
+  expect(screen.queryByText('Log out')).not.toBeInTheDocument();
   global.fetch.mockResolvedValueOnce(successResponse());
   await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Retry verification' })); });
+  expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  openAccount('Account: Fixture');
   expect(screen.getByText('Hello, Fixture')).toBeVisible();
   expect(global.fetch.mock.calls[2][1].headers.Authorization).toBe('Bearer synthetic-proof-a');
 });
@@ -126,11 +149,14 @@ it('temporary verification outage shows explicit retry and preserves the reviewe
 it('optional name falls back to a verified-account greeting; a popup result after logout is ignored', async () => {
   render(<AccountHarness />);
   await signIn(successResponse(null));
+  openAccount('Account');
   expect(screen.getByText('Signed in with Google')).toBeVisible();
   expect(screen.queryByText(/Hello, undefined/)).not.toBeInTheDocument();
   fireEvent.click(screen.getByRole('button', { name: 'Log out' }));
   expect(googleLogout).toHaveBeenCalledTimes(1);
-  expect(screen.getByText('Sign in to save your routes and locations.')).toBeVisible();
+  expect(screen.queryByText('Signed in with Google')).not.toBeInTheDocument();
+  expect(screen.getByText('Sign in to save')).toBeVisible();
+  expect(screen.getByRole('button', { name: 'Sign in with Google' })).toBeEnabled();
   const calls = global.fetch.mock.calls.length;
   await popupReturns({ code: '4/late-old-code' });
   act(() => { mockGoogle.options.onError({ error: 'access_denied' }); });
@@ -141,21 +167,27 @@ it('optional name falls back to a verified-account greeting; a popup result afte
 it('a late popup result from A cannot replace or reject newly verified B', async () => {
   render(<AccountHarness />);
   await signIn();
+  openAccount('Account: Fixture');
   fireEvent.click(screen.getByRole('button', { name: 'Log out' }));
   await signIn(successResponse('Second account', NOW / 1000 + 3600, 'synthetic-account-b'), 'synthetic-proof-b');
   const calls = global.fetch.mock.calls.length;
   await popupReturns({ code: '4/late-a-code' });
   act(() => { mockGoogle.options.onNonOAuthError({ type: 'popup_closed' }); });
   expect(global.fetch).toHaveBeenCalledTimes(calls);
+  expect(screen.queryByRole('button', { name: 'Account: Fixture' })).not.toBeInTheDocument();
+  openAccount('Account: Second account');
   expect(screen.getByText('Hello, Second account')).toBeVisible();
+  expect(screen.queryByText('Hello, Fixture')).not.toBeInTheDocument();
   expect(screen.queryByRole('alert')).not.toBeInTheDocument();
 });
 
 it('expiry clears greeting and offers sign-in again', async () => {
   render(<AccountHarness />);
   await signIn(successResponse('Fixture', NOW / 1000 + 1));
+  openAccount('Account: Fixture');
   act(() => { jest.advanceTimersByTime(1000); });
   expect(screen.queryByText('Hello, Fixture')).not.toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: /^Account/ })).not.toBeInTheDocument();
   expect(screen.getByRole('alert')).toHaveTextContent('sign-in expired');
   expect(screen.getByRole('button', { name: 'Sign in with Google' })).toBeVisible();
 });
@@ -196,5 +228,64 @@ it('StrictMode effect remount does not authenticate or call the backend automati
   expect(mockGoogle.popups).toBe(0);
   await signIn();
   expect(global.fetch).toHaveBeenCalledTimes(2);
+  openAccount('Account: Fixture');
   expect(screen.getByText('Hello, Fixture')).toBeVisible();
+});
+
+it('mouse hover opens the account panel, Escape closes it and returns focus, an outside click closes it', async () => {
+  render(<><AccountHarness /><button type="button">Elsewhere</button></>);
+  await signIn();
+  // Pointer events bubble from the circle, so React reports enter and leave on the whole menu.
+  const account = screen.getByRole('button', { name: 'Account: Fixture' });
+  pointer(account, 'pointerover', 'touch');
+  expect(account).toHaveAttribute('aria-expanded', 'false');
+  pointer(account, 'pointerover');
+  expect(account).toHaveAttribute('aria-expanded', 'true');
+  expect(screen.getByRole('button', { name: 'Log out' })).toBeVisible();
+  pointer(account, 'pointerout');
+  act(() => { jest.advanceTimersByTime(200); });
+  expect(account).toHaveAttribute('aria-expanded', 'false');
+  openAccount('Account: Fixture');
+  screen.getByRole('button', { name: 'Log out' }).focus();
+  fireEvent.keyDown(screen.getByRole('button', { name: 'Log out' }), { key: 'Escape' });
+  expect(account).toHaveAttribute('aria-expanded', 'false');
+  expect(account).toHaveFocus();
+  openAccount('Account: Fixture');
+  fireEvent.pointerDown(screen.getByText('Hello, Fixture'));
+  expect(account).toHaveAttribute('aria-expanded', 'true');
+  fireEvent.pointerDown(screen.getByRole('button', { name: 'Elsewhere' }));
+  expect(account).toHaveAttribute('aria-expanded', 'false');
+  expect(googleLogout).not.toHaveBeenCalled();
+});
+
+test('keyboard focus on the account circle opens the panel', async () => {
+  render(<AccountHarness />);
+  await signIn();
+  const account = screen.getByRole('button', { name: 'Account: Fixture' });
+  act(() => { account.focus(); });
+  expect(account).toHaveAttribute('aria-expanded', 'true');
+});
+
+test('a mouse click on the circle after hovering it leaves the panel open', async () => {
+  render(<AccountHarness />);
+  await signIn();
+  const account = screen.getByRole('button', { name: 'Account: Fixture' });
+  pointer(account, 'pointerover');
+  fireEvent.click(account);
+  expect(account).toHaveAttribute('aria-expanded', 'true');
+});
+
+it('the notice under the header carries errors and retry but never the greeting', async () => {
+  const auth = { status: 'anonymous', profile: null, error: '', retryable: false, signIn: jest.fn(), signInReady: true,
+    logOut: jest.fn(), retry: jest.fn() };
+  const { rerender } = render(<GoogleAccountNotice auth={auth} />);
+  expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  rerender(<GoogleAccountNotice auth={{ ...auth, error: 'Sign-in verification is temporarily unavailable. Please retry.', retryable: true }} />);
+  fireEvent.click(screen.getByRole('button', { name: 'Retry verification' }));
+  expect(auth.retry).toHaveBeenCalledTimes(1);
+  rerender(<GoogleAccountNotice auth={{ ...auth, status: 'verifying', retryable: true }} />);
+  expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  rerender(<GoogleAccountNotice auth={{ ...auth, status: 'authenticated', profile: { id: 'google:synthetic', given_name: 'Fixture' } }} />);
+  expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  expect(screen.queryByText(/Fixture/)).not.toBeInTheDocument();
 });

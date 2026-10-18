@@ -20,7 +20,7 @@ const response = (data, status = 200) => ({ status, ok: status < 400, json: asyn
 const list = (...locations) => response({ status: 'success', locations });
 const fixtures = (overrides = {}) => ({ locations: [row], loading: false, error: null,
   refresh: jest.fn().mockResolvedValue(undefined), save: jest.fn().mockResolvedValue(row),
-  remove: jest.fn().mockResolvedValue(undefined), ...overrides });
+  remove: jest.fn().mockResolvedValue(undefined), edit: jest.fn(async (id, label, chosen) => ({ ...row, label, source: chosen })), ...overrides });
 let autocomplete;
 const map = {};
 beforeEach(() => {
@@ -35,7 +35,24 @@ afterEach(() => { delete window.google; });
 // Clicks start async save/delete chains; async act settles those updates before assertions.
 // eslint-disable-next-line testing-library/no-unnecessary-act
 async function click(name) { await act(async () => { fireEvent.click(screen.getByRole('button', { name })); }); }
+// Keyboard and blur commits start async chains; async act settles them like clicks.
+async function settle(fire) { await act(async () => { fire(); }); }
 function selectAddress() { act(() => { autocomplete.callback(); }); }
+// jsdom has no PointerEvent, so the pointer type InlineEdit reads is set on a plain event.
+function pointerDown(element, pointerType) {
+  const event = new MouseEvent('pointerdown', { bubbles: true });
+  Object.defineProperty(event, 'pointerType', { value: pointerType });
+  act(() => { element.dispatchEvent(event); });
+}
+// Place details for My locations rows; a lookup without a scripted reply stays pending.
+let placeReplies;
+function placesService() {
+  placeReplies = {};
+  window.google.maps.places.PlacesService = function SyntheticPlacesService() {
+    this.getDetails = ({ placeId }, callback) => { placeReplies[placeId] = callback; };
+  };
+}
+const found = (address) => [{ formatted_address: address, geometry: { location: { lat: () => 35, lng: () => -120 } } }, 'OK'];
 
 it('entering My locations automatically loads once per entry without a render loop or manual Refresh', async () => {
   const request = jest.fn().mockResolvedValue(list(row));
@@ -83,7 +100,8 @@ it('real hook and creation form refetch confirmed add/delete while preserving su
   expect(Object.keys(JSON.parse(saveCall[1].body)).sort()).toEqual(['id', 'label', 'source']);
   await click('Delete saved location Home');
   expect(request.mock.calls.filter(([, options]) => options.method === 'DELETE')).toHaveLength(0);
-  await click('Confirm delete');
+  expect(screen.getByText('Delete “Home” from your saved locations?')).toBeVisible();
+  await click('Delete');
   expect(screen.getByText('Home deleted.')).toBeVisible();
   expect(screen.queryByText('Home')).not.toBeInTheDocument();
   expect(request.mock.calls.filter(([, options]) => options.method === 'GET')).toHaveLength(initialLoads + 2);
@@ -102,7 +120,11 @@ it('create form keeps its draft through hide/show and close/open, then clears pr
   rerender(<SavedLocationsPanel auth={auth} saved={saved} map={map} activeView="locations" />);
   expect(screen.getByRole('textbox', { name: 'Label' })).toHaveValue('Friend pickup');
   expect(screen.getByRole('textbox', { name: 'New location address' })).toHaveValue(point.address);
-  await click('Close form'); await click('Add location');
+  expect(screen.getByRole('button', { name: 'Add location' })).toHaveAttribute('aria-expanded', 'true');
+  await click('Add location');
+  expect(screen.getByRole('button', { name: 'Add location' })).toHaveAttribute('aria-expanded', 'false');
+  expect(screen.queryByRole('textbox', { name: 'Label' })).not.toBeInTheDocument();
+  await click('Add location');
   expect(screen.getByRole('textbox', { name: 'Label' })).toHaveValue('Friend pickup');
   rerender(<SavedLocationsPanel auth={{ ...auth, profile: { id: 'google:synthetic-b' }, generation: 2 }} saved={saved} map={map} activeView="locations" />);
   await click('Add location');
@@ -129,8 +151,9 @@ it('delete failure keeps confirmation and exposes retry, Keep location cancels w
   render(<SavedLocationsPanel auth={auth} saved={saved} activeView="locations" />);
   await click('Delete saved location Home'); await click('Keep location');
   expect(saved.remove).not.toHaveBeenCalled();
-  await click('Delete saved location Home'); await click('Confirm delete');
+  await click('Delete saved location Home'); await click('Delete');
   expect(screen.getByRole('alert')).toBeVisible();
+  expect(screen.getByRole('button', { name: 'Keep location' })).toBeVisible();
   await click('Retry delete');
   expect(saved.remove).toHaveBeenNthCalledWith(2, ID);
   expect(screen.getByText('Home deleted.')).toBeVisible();
@@ -138,18 +161,54 @@ it('delete failure keeps confirmation and exposes retry, Keep location cancels w
 
 it('inline save retries failure, preserves the label and clears account-owned messages on logout', async () => {
   const saved = fixtures({ save: jest.fn().mockRejectedValueOnce(new SavedApiError(409, 'LABEL_EXISTS', 'Duplicate')).mockResolvedValueOnce(row) });
-  const { rerender } = render(<SavedLocationControls auth={auth} saved={saved} point={point} onSelect={jest.fn()} fieldLabel="Driver" />);
+  const onSaved = jest.fn();
+  // The planner names the row from onSaved; the saved mark needs that nickname.
+  function Harness({ account }) {
+    const [current, setCurrent] = useState(point);
+    return <SavedLocationControls auth={account} saved={saved} point={current} onSelect={jest.fn()} fieldLabel="Driver"
+      onSaved={(confirmed) => { onSaved(confirmed); setCurrent((old) => ({ ...old, label: confirmed.label })); }} />;
+  }
+  const { rerender } = render(<Harness account={auth} />);
   await click('Save location for Driver');
+  expect(screen.getByRole('textbox', { name: 'Your label for Driver' })).toHaveAttribute('placeholder', 'Name this place, e.g. Home');
   fireEvent.change(screen.getByRole('textbox', { name: 'Your label for Driver' }), { target: { value: 'Home' } });
   await click('Save location');
   expect(screen.getByRole('alert')).toHaveTextContent('That label is already saved');
   expect(screen.getByRole('textbox', { name: 'Your label for Driver' })).toHaveValue('Home');
+  expect(onSaved).not.toHaveBeenCalled();
   await click('Retry saving location');
-  expect(screen.getByText('Home saved.')).toBeVisible();
-  expect(screen.getByRole('button', { name: 'Location saved' })).toBeDisabled();
-  rerender(<SavedLocationControls auth={{ status: 'anonymous', generation: 2 }} saved={saved} point={point} onSelect={jest.fn()} fieldLabel="Driver" />);
+  expect(saved.save).toHaveBeenNthCalledWith(2, 'Home', source);
+  expect(screen.getByText('Home saved.')).toBeInTheDocument();
+  expect(onSaved).toHaveBeenCalledWith(row);
+  expect(screen.queryByRole('textbox', { name: 'Your label for Driver' })).not.toBeInTheDocument();
+  expect(screen.getByRole('img', { name: 'Driver is saved as Home' })).toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'Save location for Driver' })).not.toBeInTheDocument();
+  rerender(<Harness account={{ status: 'anonymous', generation: 2 }} />);
   expect(screen.queryByText('Home saved.')).not.toBeInTheDocument();
+  expect(screen.queryByRole('img')).not.toBeInTheDocument();
   expect(screen.queryByRole('textbox')).not.toBeInTheDocument();
+});
+
+it('the in-field Save toggle appears only for a Google place and Escape closes its form', async () => {
+  const saved = fixtures({ locations: [] });
+  const unplaced = { address: 'Typed only', source: null, coordinates: { lat: null, lng: null } };
+  const { rerender } = render(<SavedLocationControls auth={auth} saved={saved} point={unplaced} onSelect={jest.fn()} fieldLabel="Pickup 1"
+    renderAddress={(action) => <div data-testid="field">{action}</div>} />);
+  expect(screen.getByTestId('field')).toBeEmptyDOMElement();
+  rerender(<SavedLocationControls auth={auth} saved={saved} point={point} onSelect={jest.fn()} fieldLabel="Pickup 1"
+    renderAddress={(action) => <div data-testid="field">{action}</div>} />);
+  const toggle = screen.getByRole('button', { name: 'Save location for Pickup 1' });
+  expect(toggle).toHaveTextContent('Save');
+  expect(toggle).toHaveAttribute('aria-expanded', 'false');
+  await click('Save location for Pickup 1');
+  expect(screen.getByRole('button', { name: 'Hide save form for Pickup 1' })).toHaveAttribute('aria-expanded', 'true');
+  expect(screen.getByRole('textbox', { name: 'Your label for Pickup 1' })).toHaveFocus();
+  expect(screen.queryByText('Create label before saving')).not.toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Save location' })).toBeDisabled();
+  fireEvent.keyDown(screen.getByRole('textbox', { name: 'Your label for Pickup 1' }), { key: 'Escape' });
+  expect(screen.queryByRole('textbox', { name: 'Your label for Pickup 1' })).not.toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Save location for Pickup 1' })).toHaveFocus();
+  expect(saved.save).not.toHaveBeenCalled();
 });
 
 it('an edit supersedes pending inline selection without exposing stale completion or losing save draft', async () => {
@@ -187,17 +246,23 @@ it('shared section picker retries a lookup without altering the independent crea
 it('address chooser retains editable text after lookup failure and ignores late failure after typing', async () => {
   const pending = deferred();
   const onSelect = jest.fn().mockRejectedValueOnce(new Error('Synthetic outage')).mockReturnValueOnce(pending.promise);
-  function Harness() { const [value, setValue] = useState('Draft address'); return <AddressInput value={value} label="Pickup address" onChange={(patch) => setValue(patch.address)} savedLocations={[row]} onSavedSelect={onSelect} />; }
+  function Harness() { const [value, setValue] = useState('Ho'); return <AddressInput value={value} label="Pickup address" onChange={(patch) => setValue(patch.address)} savedLocations={[row]} onSavedSelect={onSelect} />; }
   render(<Harness />);
-  fireEvent.change(screen.getByRole('combobox'), { target: { value: ID } });
+  const field = () => screen.getByRole('combobox', { name: 'Pickup address' });
+  act(() => { field().focus(); });
+  fireEvent.mouseDown(screen.getByRole('option', { name: 'Home' }));
   expect(await screen.findByRole('alert')).toHaveTextContent('Choose it again to retry');
-  expect(screen.getByRole('textbox')).toHaveValue('Draft address');
-  fireEvent.change(screen.getByRole('combobox'), { target: { value: ID } });
-  fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Changed draft' } });
+  expect(field()).toHaveValue('Ho');
+  expect(field()).toBeEnabled();
+  fireEvent.mouseDown(screen.getByRole('option', { name: 'Home' }));
+  expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  expect(screen.getByRole('status')).toHaveTextContent('Loading saved place…');
+  fireEvent.change(field(), { target: { value: 'Changed draft' } });
   await act(async () => { pending.reject(new Error('Late failure')); await pending.promise.catch(() => {}); });
   expect(screen.queryByRole('alert')).not.toBeInTheDocument();
-  expect(screen.getByRole('textbox')).toHaveValue('Changed draft');
-  expect(screen.getByRole('combobox')).not.toBeDisabled();
+  expect(screen.queryByRole('status')).not.toBeInTheDocument();
+  expect(field()).toHaveValue('Changed draft');
+  expect(onSelect).toHaveBeenCalledTimes(2);
 });
 
 it('a pending create cannot expose success after logout or repopulate a different account draft', async () => {
@@ -215,4 +280,84 @@ it('a pending create cannot expose success after logout or repopulate a differen
   await act(async () => { pending.resolve(row); await pending.promise; });
   expect(screen.queryByText('Home saved.')).not.toBeInTheDocument();
   expect(screen.getByRole('textbox', { name: 'Label' })).toHaveValue('Second account draft');
+});
+
+it('My locations rows show the label over the current address looked up from the place ID, kept in memory only', async () => {
+  placesService();
+  const work = { ...row, id: '00000000-0000-4000-8000-000000000002', label: 'Work', source: { kind: 'google_places', place_id: 'synthetic-work' } };
+  const saved = fixtures({ locations: [row, work] });
+  render(<SavedLocationsPanel auth={auth} saved={saved} map={map} activeView="locations" />);
+  expect(screen.getByRole('button', { name: 'Name of saved location Home: Home. Press Enter to edit' })).toBeVisible();
+  expect(screen.getAllByText('Looking up address…')).toHaveLength(2);
+  await act(async () => { placeReplies['synthetic-place'](...found('1 Synthetic Home Road')); });
+  expect(screen.getByRole('button', { name: 'Address of Home: 1 Synthetic Home Road. Press Enter to edit' })).toBeVisible();
+  await act(async () => { placeReplies['synthetic-work'](null, 'NOT_FOUND'); });
+  expect(screen.getByRole('button', { name: /^Address of Work: Address unavailable\. Double-click to choose it again\./ })).toBeVisible();
+  expect(saved.edit).not.toHaveBeenCalled();
+  expect(saved.save).not.toHaveBeenCalled();
+  expect(window.localStorage.length).toBe(0);
+  expect(window.sessionStorage.length).toBe(0);
+  expect(screen.queryByRole('button', { name: /^Edit/ })).not.toBeInTheDocument();
+});
+
+it('a label edits in place: double-click or keyboard opens it, Enter or blur saves through edit, Escape reverts', async () => {
+  const saved = fixtures();
+  render(<SavedLocationsPanel auth={auth} saved={saved} activeView="locations" />);
+  const name = () => screen.getByRole('button', { name: /^Name of saved location Home/ });
+  const editor = () => screen.getByRole('textbox', { name: 'Name of saved location Home' });
+  pointerDown(name(), 'mouse'); fireEvent.click(name(), { detail: 1 });
+  expect(screen.queryByRole('textbox', { name: 'Name of saved location Home' })).not.toBeInTheDocument();
+  fireEvent.doubleClick(name());
+  expect(editor()).toHaveFocus();
+  expect(editor()).toHaveValue('Home');
+  fireEvent.change(editor(), { target: { value: 'Reverted name' } });
+  fireEvent.keyDown(editor(), { key: 'Escape' });
+  expect(name()).toHaveTextContent('Home');
+  expect(saved.edit).not.toHaveBeenCalled();
+  fireEvent.click(name());
+  fireEvent.change(editor(), { target: { value: 'Home base' } });
+  await settle(() => fireEvent.keyDown(editor(), { key: 'Enter' }));
+  expect(saved.edit).toHaveBeenCalledWith(ID, 'Home base', source);
+  expect(screen.getByText('Renamed to Home base.')).toBeVisible();
+  pointerDown(name(), 'touch'); fireEvent.click(name(), { detail: 1 });
+  fireEvent.change(editor(), { target: { value: 'Family home' } });
+  await settle(() => fireEvent.blur(editor()));
+  expect(saved.edit).toHaveBeenLastCalledWith(ID, 'Family home', source);
+  expect(saved.edit).toHaveBeenCalledTimes(2);
+});
+
+it('a rejected rename keeps the old label and reports the failure on that row', async () => {
+  const saved = fixtures({ edit: jest.fn().mockRejectedValue(new SavedApiError(409, 'LABEL_EXISTS', 'Duplicate')) });
+  render(<SavedLocationsPanel auth={auth} saved={saved} activeView="locations" />);
+  fireEvent.doubleClick(screen.getByRole('button', { name: /^Name of saved location Home/ }));
+  fireEvent.change(screen.getByRole('textbox', { name: 'Name of saved location Home' }), { target: { value: 'Work' } });
+  await settle(() => fireEvent.keyDown(screen.getByRole('textbox', { name: 'Name of saved location Home' }), { key: 'Enter' }));
+  expect(screen.getByRole('alert')).toHaveTextContent('That label is already saved');
+  expect(screen.getByRole('button', { name: /^Name of saved location Home/ })).toHaveTextContent('Home');
+  expect(screen.queryByText(/Renamed to/)).not.toBeInTheDocument();
+});
+
+it('an address edit commits only a chosen Google suggestion and sends only its place reference', async () => {
+  placesService();
+  const saved = fixtures();
+  render(<SavedLocationsPanel auth={auth} saved={saved} map={map} activeView="locations" />);
+  await act(async () => { placeReplies['synthetic-place'](...found('1 Synthetic Home Road')); });
+  const address = () => screen.getByRole('button', { name: /^Address of Home/ });
+  fireEvent.doubleClick(address());
+  const editor = screen.getByRole('textbox', { name: 'New address for Home' });
+  expect(editor).toHaveValue('1 Synthetic Home Road');
+  fireEvent.keyDown(editor, { key: 'Escape' });
+  expect(address()).toHaveTextContent('1 Synthetic Home Road');
+  fireEvent.doubleClick(address());
+  fireEvent.change(screen.getByRole('textbox', { name: 'New address for Home' }), { target: { value: '2 Synthetic Typed Lane' } });
+  expect(saved.edit).not.toHaveBeenCalled();
+  expect(screen.getByRole('textbox', { name: 'New address for Home' })).toBeInTheDocument();
+  autocomplete.instance.getPlace = () => ({ place_id: 'synthetic-new-place', formatted_address: '3 Synthetic Chosen Way',
+    geometry: { location: { lat: () => 36, lng: () => -121 } } });
+  await act(async () => { autocomplete.callback(); });
+  expect(saved.edit).toHaveBeenCalledTimes(1);
+  expect(saved.edit.mock.calls[0]).toEqual([ID, 'Home', { kind: 'google_places', place_id: 'synthetic-new-place' }]);
+  expect(JSON.stringify(saved.edit.mock.calls[0])).not.toMatch(/Synthetic Chosen Way|36|-121/);
+  expect(screen.getByText('Home address updated.')).toBeVisible();
+  expect(screen.queryByRole('textbox', { name: 'New address for Home' })).not.toBeInTheDocument();
 });

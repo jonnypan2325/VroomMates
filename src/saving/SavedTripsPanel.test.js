@@ -24,11 +24,16 @@ async function renderPanel(auth, props = {}) {
   await waitFor(() => expect(screen.queryByText('Loading saved trips…')).not.toBeInTheDocument());
   return view;
 }
-const nameRoute = name => fireEvent.change(screen.getByRole('textbox', { name: 'Route name' }), { target: { value: name } });
+// The route name and save buttons sit behind the Save this route (or Save changes) disclosure.
+const saveToggle = () => screen.getByRole('button', { name: /^(Save this route|Save changes)/ });
+const openSave = () => { if (saveToggle().getAttribute('aria-expanded') !== 'true') fireEvent.click(saveToggle()); };
+const nameRoute = name => { openSave(); fireEvent.change(screen.getByRole('textbox', { name: 'Route name' }), { target: { value: name } }); };
 // fireEvent's synchronous act does not flush requestJSON's awaited transport/JSON updates.
 // Removing this async boundary causes 12 timing failures and unwrapped update warnings.
 // eslint-disable-next-line testing-library/no-unnecessary-act
 async function click(name) { await act(async () => { fireEvent.click(screen.getByRole('button', { name })); }); }
+// Keyboard and blur commits start async chains; async act settles them like clicks.
+async function settle(fire) { await act(async () => { fire(); }); }
 
 it('saves a source-only snapshot once and refreshes its list after confirmation', async () => {
   const transport = jest.fn(async (path, options) => {
@@ -36,8 +41,10 @@ it('saves a source-only snapshot once and refreshes its list after confirmation'
     return empty();
   });
   await renderPanel(authFor(transport)); nameRoute(' Team trip '); await click('Save route');
-  expect(screen.getByRole('button', { name: 'Route saved' })).toBeDisabled();
   expect(screen.getByText('Route saved. Find it in My trips.')).toBeVisible();
+  expect(saveToggle()).toHaveAttribute('aria-expanded', 'false');
+  openSave();
+  expect(screen.getByRole('button', { name: 'Route saved' })).toBeDisabled();
   const posts = transport.mock.calls.filter(([, options]) => options.method === 'POST');
   expect(posts).toHaveLength(1);
   expect(JSON.parse(posts[0][1].body)).toMatchObject({ title: 'Team trip', snapshot: snapshot() });
@@ -75,7 +82,7 @@ it('reposts the exact same intent after a reconciliation 404', async () => {
   });
   await renderPanel(authFor(transport)); nameRoute('Team trip'); await click('Save route'); await click('Check and retry save');
   expect(bodies).toHaveLength(2); expect(bodies[0]).toBe(bodies[1]);
-  expect(screen.getByRole('button', { name: 'Route saved' })).toBeDisabled();
+  openSave(); expect(screen.getByRole('button', { name: 'Route saved' })).toBeDisabled();
 });
 it('rejects a reconciliation response containing another intent and allows a new save', async () => {
   let attempt;
@@ -108,7 +115,7 @@ it('loads only validated detail with the revision token captured before the netw
   const begin = jest.fn(() => { events.push('begin'); return 'revision-at-click'; });
   const load = jest.fn(); const end = jest.fn();
   await renderPanel(authFor(transport), { onBeginLoad: begin, onLoad: load, onEndLoad: end });
-  fireEvent.click(screen.getByRole('button', { name: 'Load Team trip' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Open Team trip' }));
   expect(events).toEqual(['begin', 'request']); expect(load).not.toHaveBeenCalled();
   await act(async () => { pending.resolve(response(detail())); });
   expect(load).toHaveBeenCalledWith(snapshot(), 'revision-at-click');
@@ -122,7 +129,7 @@ it.each(['wrong-id', 'coordinates', 'duplicate-pickup', 'bad-date'])('never appl
   if (kind === 'duplicate-pickup') body.trip.snapshot.routes[0].stop_ids.splice(1, 0, 'pickup');
   if (kind === 'bad-date') body.trip.created_at = 'not-a-date';
   const transport = jest.fn(async path => path === '/saved-trips?limit=20' ? response({ trips: [summary()], next_cursor: null }) : response(body));
-  const load = jest.fn(); await renderPanel(authFor(transport), { onLoad: load }); await click('Load Team trip');
+  const load = jest.fn(); await renderPanel(authFor(transport), { onLoad: load }); await click('Open Team trip');
   expect(load).not.toHaveBeenCalled(); expect(screen.getByRole('alert')).toHaveTextContent('could not be loaded');
 });
 it('requires confirmation before deletion and removes only a confirmed 204', async () => {
@@ -169,7 +176,7 @@ it.each(['owner-change', 'unmount'])('aborts stale load on %s while completing p
   const transport = jest.fn(path => path === '/saved-trips?limit=20' ? Promise.resolve(response({ trips: [summary()], next_cursor: null })) : pending.promise);
   const load = jest.fn(); const end = jest.fn(); const begin = jest.fn(() => 'captured');
   const view = await renderPanel(authFor(transport), { onLoad: load, onBeginLoad: begin, onEndLoad: end });
-  fireEvent.click(screen.getByRole('button', { name: 'Load Team trip' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Open Team trip' }));
   const signal = transport.mock.calls[1][1].signal;
   if (kind === 'unmount') view.unmount();
   else view.rerender(<SavedTripsPanel auth={authFor(undefined, 'google:b', 2)} onLoad={load} onEndLoad={end} />);
@@ -259,4 +266,125 @@ it('same owner with a new authentication generation cannot receive prior-generat
   expect(signal.aborted).toBe(true);
   await act(async () => { pending.resolve(response({ trips: [summary()], next_cursor: null })); });
   expect(screen.queryByText('Team trip')).not.toBeInTheDocument();
+});
+
+it('Save this route is a disclosure that holds the route name and the save button', async () => {
+  await renderPanel(authFor());
+  expect(saveToggle()).toHaveTextContent('Save this route');
+  expect(saveToggle()).toHaveAttribute('aria-expanded', 'false');
+  expect(screen.queryByRole('textbox', { name: 'Route name' })).not.toBeInTheDocument();
+  fireEvent.click(saveToggle());
+  expect(saveToggle()).toHaveAttribute('aria-expanded', 'true');
+  const form = screen.getByRole('region', { name: 'Save route' });
+  expect(form).toContainElement(screen.getByRole('textbox', { name: 'Route name' }));
+  expect(screen.getByRole('button', { name: 'Save route' })).toBeDisabled();
+  fireEvent.click(saveToggle());
+  expect(screen.queryByRole('textbox', { name: 'Route name' })).not.toBeInTheDocument();
+});
+
+it('an opened trip updates in place with PATCH, reports no changes, and can still be saved as a new trip', async () => {
+  const changed = snapshot(); changed.inputs.drivers[0].capacity = 3;
+  const transport = jest.fn(async (path, options) => {
+    if (path === '/saved-trips?limit=20') return response({ trips: [summary()], next_cursor: null });
+    const body = options.body && JSON.parse(options.body);
+    if (options.method === 'PATCH') return response(detail(ID, body.title, body.snapshot));
+    if (options.method === 'POST') return response(detail(body.id, body.title, body.snapshot), 201);
+    return response(detail());
+  });
+  const auth = authFor(transport), onOpened = jest.fn(), load = jest.fn();
+  const view = await renderPanel(auth, { onLoad: load, onOpened });
+  await click('Open Team trip');
+  expect(onOpened).toHaveBeenCalledWith({ id: ID, title: 'Team trip' });
+  const props = { auth, routeAvailable: true, onLoad: load, onOpened, openedTrip: { id: ID, title: 'Team trip' } };
+  view.rerender(<SavedTripsPanel {...props} snapshot={snapshot()} />);
+  expect(saveToggle()).toHaveTextContent('Save changes');
+  openSave();
+  expect(screen.getByRole('textbox', { name: 'Route name' })).toHaveValue('Team trip');
+  expect(screen.getByRole('button', { name: 'No changes to save' })).toBeDisabled();
+  view.rerender(<SavedTripsPanel {...props} snapshot={changed} />);
+  await click('Update “Team trip”');
+  const patches = transport.mock.calls.filter(([, options]) => options.method === 'PATCH');
+  expect(patches).toHaveLength(1);
+  expect(patches[0][0]).toBe(`/saved-trips/${ID}`);
+  expect(JSON.parse(patches[0][1].body)).toEqual({ title: 'Team trip', snapshot: changed });
+  expect(transport.mock.calls.some(([, options]) => options.method === 'POST')).toBe(false);
+  expect(screen.getByText('Updated “Team trip”.')).toBeVisible();
+  expect(saveToggle()).toHaveAttribute('aria-expanded', 'false');
+  openSave();
+  expect(screen.getByRole('button', { name: 'No changes to save' })).toBeDisabled();
+  await click('Save as new trip');
+  const posts = transport.mock.calls.filter(([, options]) => options.method === 'POST');
+  expect(posts).toHaveLength(1);
+  const created = JSON.parse(posts[0][1].body);
+  expect(created.id).not.toBe(ID);
+  expect(created).toMatchObject({ title: 'Team trip', snapshot: changed });
+  expect(onOpened).toHaveBeenLastCalledWith({ id: created.id, title: 'Team trip' });
+});
+
+it('My trips rows show an editable title, a count and date line, Open, and a delete icon', async () => {
+  const transport = jest.fn(async (path, options) => {
+    if (options.method === 'PATCH') return response(detail(ID, JSON.parse(options.body).title));
+    return response({ trips: [summary(), { ...summary(OTHER_ID, 'Big trip'), driver_count: 2, passenger_count: 5 }], next_cursor: null });
+  });
+  const onOpened = jest.fn();
+  await renderPanel(authFor(transport), { openedTrip: { id: ID, title: 'Team trip' }, onOpened });
+  expect(screen.getByText(/^1 driver · 1 passenger · \S/)).toBeVisible();
+  expect(screen.getByText(/^2 drivers · 5 passengers · \S/)).toBeVisible();
+  expect(screen.getByRole('button', { name: 'Open Big trip' })).toHaveTextContent(/^Open$/);
+  expect(screen.getByRole('button', { name: 'Delete Big trip' })).toBeVisible();
+  fireEvent.doubleClick(screen.getByRole('button', { name: /^Name of trip Team trip/ }));
+  const editor = screen.getByRole('textbox', { name: 'Name of trip Team trip' });
+  fireEvent.change(editor, { target: { value: ' Renamed trip ' } });
+  await settle(() => fireEvent.keyDown(editor, { key: 'Enter' }));
+  const patches = transport.mock.calls.filter(([, options]) => options.method === 'PATCH');
+  expect(patches).toHaveLength(1);
+  expect(patches[0][0]).toBe(`/saved-trips/${ID}`);
+  expect(JSON.parse(patches[0][1].body)).toEqual({ title: 'Renamed trip' });
+  expect(screen.getByRole('button', { name: /^Name of trip Renamed trip/ })).toBeVisible();
+  expect(screen.getByText('Renamed to “Renamed trip”.')).toBeVisible();
+  expect(onOpened).toHaveBeenCalledWith({ id: ID, title: 'Renamed trip' });
+});
+
+it('Refresh reloads My trips quietly while rows are shown; loading text appears only for an empty list', async () => {
+  const first = deferred(), later = deferred();
+  const transport = jest.fn().mockReturnValueOnce(first.promise).mockReturnValueOnce(later.promise);
+  render(<SavedTripsPanel auth={authFor(transport)} snapshot={snapshot()} routeAvailable onLoad={jest.fn()} />);
+  expect(screen.getByText('Loading saved trips…')).toBeVisible();
+  await act(async () => { first.resolve(response({ trips: [summary()], next_cursor: null })); });
+  fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+  expect(screen.getByRole('button', { name: 'Loading…' })).toBeDisabled();
+  expect(screen.queryByText('Loading saved trips…')).not.toBeInTheDocument();
+  expect(screen.getByText('Team trip')).toBeVisible();
+  await act(async () => { later.resolve(response({ trips: [summary(), summary(OTHER_ID, 'Second trip')], next_cursor: null })); });
+  expect(screen.getByText('Second trip')).toBeVisible();
+  expect(screen.getByRole('heading', { name: 'My trips (2)' })).toBeVisible();
+});
+
+// The real protectedRequest rejects an aborted request with AbortError, as this transport does.
+const abortable = (method) => jest.fn((path, options) => options.method === method
+  ? new Promise((_, reject) => options.signal.addEventListener('abort', () => reject(new DOMException('Authentication changed.', 'AbortError'))))
+  : Promise.resolve(response({ trips: [summary()], next_cursor: null })));
+
+test('an update interrupted by an owner change shows no failure to the next owner', async () => {
+  const changed = snapshot(); changed.inputs.drivers[0].capacity = 3;
+  const transport = abortable('PATCH');
+  const view = await renderPanel(authFor(transport), { snapshot: changed, openedTrip: { id: ID, title: 'Team trip' } });
+  nameRoute('Team trip');
+  fireEvent.click(screen.getByRole('button', { name: 'Update “Team trip”' }));
+  expect(transport.mock.calls.some(([, options]) => options.method === 'PATCH')).toBe(true);
+  view.rerender(<SavedTripsPanel auth={authFor(jest.fn(async () => empty()), 'google:b', 2)} snapshot={snapshot()} routeAvailable onLoad={jest.fn()} />);
+  await act(async () => { await Promise.resolve(); });
+  expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+});
+
+test('a rename interrupted by an owner change shows no failure to the next owner', async () => {
+  const transport = abortable('PATCH');
+  const view = await renderPanel(authFor(transport));
+  fireEvent.doubleClick(screen.getByRole('button', { name: /^Name of trip Team trip/ }));
+  fireEvent.change(screen.getByRole('textbox', { name: 'Name of trip Team trip' }), { target: { value: 'Renamed trip' } });
+  fireEvent.keyDown(screen.getByRole('textbox', { name: 'Name of trip Team trip' }), { key: 'Enter' });
+  expect(transport.mock.calls.some(([, options]) => options.method === 'PATCH')).toBe(true);
+  view.rerender(<SavedTripsPanel auth={authFor(jest.fn(async () => empty()), 'google:b', 2)} snapshot={snapshot()} routeAvailable onLoad={jest.fn()} />);
+  await act(async () => { await Promise.resolve(); });
+  expect(screen.queryByRole('alert')).not.toBeInTheDocument();
 });
