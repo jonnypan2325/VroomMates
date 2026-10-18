@@ -307,18 +307,6 @@ The objective is total geographic distance, with deterministic recurrence ties a
 ordinary floating-point accuracy. Correctness comparisons use a numerical tolerance;
 this does not promise bit-exact real-number costs, road travel times or other modes.
 
-After combining the optimizer and auth changes, reproduce the synthetic optimizer
-reference budget with the supported Python environment:
-
-```bash
-python scripts/benchmark_optimizer.py --repeats 5
-python scripts/benchmark_optimizer.py --memory
-```
-
-The first command times serial untraced solves; the second measures traced solver
-allocations separately. These local synthetic budgets do not establish deployed
-concurrency or real-user route acceptance.
-
 
 ### Private saved-data API (local implementation)
 
