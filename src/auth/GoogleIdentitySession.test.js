@@ -240,3 +240,24 @@ it('fresh controller models refresh/new-tab sign-in and rejects off-API destinat
   expect(fetchImpl).toHaveBeenCalledTimes(1);
   fresh.clear();
 });
+
+it('default timers run unbound, as browsers require', async () => {
+  jest.useRealTimers();
+  const realSet = global.setTimeout, realClear = global.clearTimeout;
+  const browserLike = (real) => function timer(...args) {
+    if (this !== undefined && this !== global) throw new TypeError('Illegal invocation');
+    return real(...args);
+  };
+  global.setTimeout = browserLike(realSet);
+  global.clearTimeout = browserLike(realClear);
+  const browser = new GoogleIdentitySession({ apiUrl: 'https://synthetic-api.example', fetchImpl });
+  try {
+    fetchImpl.mockResolvedValueOnce(response(200, proof('a', { expires_at: Math.floor(Date.now() / 1000) + 3600 })));
+    await browser.acceptGoogle({ credential: 'synthetic-proof-a' }, 0);
+    expect(browser.getSnapshot()).toMatchObject({ status: 'authenticated' });
+  } finally {
+    global.setTimeout = realSet;
+    global.clearTimeout = realClear;
+    browser.clear();
+  }
+});

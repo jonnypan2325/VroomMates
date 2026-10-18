@@ -1,7 +1,8 @@
 // Credentials live only in this instance. Never put them in React state or storage.
 export default class GoogleIdentitySession {
   constructor({ apiUrl, fetchImpl = (...args) => fetch(...args), now = Date.now,
-    setTimer = setTimeout, clearTimer = clearTimeout, onLogout = () => {} }) {
+    setTimer = (...args) => setTimeout(...args), clearTimer = (id) => clearTimeout(id),
+    onLogout = () => {} }) {
     this.apiUrl = apiUrl.replace(/\/$/, '');
     this.fetchImpl = fetchImpl;
     this.now = now;
