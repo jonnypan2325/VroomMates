@@ -1,10 +1,8 @@
 import React from 'react';
-import { GoogleLogin } from '@react-oauth/google';
 import './GoogleAccount.css';
 
 export default function GoogleAccount({ auth }) {
-  const { profile, status, error, retryable, generation,
-    onGoogleSuccess, onGoogleError, logOut, retry } = auth;
+  const { profile, status, error, retryable, signIn, signInReady, logOut, retry } = auth;
   return (
     <section className="google-account" aria-label="Google account" aria-busy={status === 'verifying'}>
       {status === 'authenticated' ? (
@@ -18,8 +16,7 @@ export default function GoogleAccount({ auth }) {
         </div>
       ) : (
         <div className="google-signin">
-          <GoogleLogin key={generation} onSuccess={onGoogleSuccess} onError={onGoogleError}
-            useOneTap={false} auto_select={false} width="220" />
+          <button className="google-btn google-signin-btn" onClick={signIn} disabled={!signInReady}>Sign in with Google</button>
           {retryable && <div className="account-row google-retry-actions">
             <button className="google-btn" onClick={retry}>Retry verification</button>
           </div>}

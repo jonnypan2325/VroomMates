@@ -4,30 +4,17 @@ import { googleLogout } from '@react-oauth/google';
 import GoogleAccount from './GoogleAccount';
 import useGoogleProfile from '../hooks/useGoogleProfile';
 
-const mockGoogleMounts = [];
-jest.mock('@react-oauth/google', () => {
-  const React = require('react');
-  return {
-    googleLogout: jest.fn(),
-    GoogleLogin: function FixtureGoogleLogin(props) {
-      // Match the installed wrapper's mutable callback refs. Retained callbacks
-      // remain callable after unmount, so keyed remounts are actually exercised.
-      const success = React.useRef(props.onSuccess);
-      const error = React.useRef(props.onError);
-      success.current = props.onSuccess;
-      error.current = props.onError;
-      React.useEffect(() => {
-        const mount = {
-          success: (credential) => success.current(credential),
-          error: () => error.current(), props, unmounted: false,
-        };
-        mockGoogleMounts.push(mount);
-        return () => { mount.unmounted = true; };
-      }, []);
-      return React.createElement('button', { onClick: () => props.onSuccess({ credential: 'synthetic-proof-a' }) }, 'Fixture Google sign-in');
-    },
-  };
-});
+// Like the installed hook, callbacks are read from the latest render, so a popup
+// result arriving late reaches the current options rather than a stale copy.
+const mockGoogle = { options: null, popups: 0, ready: true };
+jest.mock('@react-oauth/google', () => ({
+  googleLogout: jest.fn(),
+  useGoogleOAuth: () => ({ scriptLoadedSuccessfully: mockGoogle.ready }),
+  useGoogleLogin: (options) => {
+    mockGoogle.options = options;
+    return () => { mockGoogle.popups += 1; };
+  },
+}));
 
 const NOW = 1900000000000;
 const deferred = () => {
@@ -35,10 +22,10 @@ const deferred = () => {
   const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
   return { promise, resolve, reject };
 };
-const successResponse = (name = 'Fixture', expiry = NOW / 1000 + 3600, subject = 'synthetic-fixture') => ({
-  ok: true, status: 200,
-  json: async () => ({ status: 'success', user: { id: `google:${subject}`, ...(name ? { given_name: name } : {}) }, expires_at: expiry }),
-});
+const reply = (status, body) => ({ ok: status >= 200 && status < 300, status, json: async () => body });
+const exchanged = (credential = 'synthetic-proof-a') => reply(200, { status: 'success', credential });
+const successResponse = (name = 'Fixture', expiry = NOW / 1000 + 3600, subject = 'synthetic-fixture') =>
+  reply(200, { status: 'success', user: { id: `google:${subject}`, ...(name ? { given_name: name } : {}) }, expires_at: expiry });
 function AccountHarness() { return <GoogleAccount auth={useGoogleProfile()} />; }
 let originalFetch;
 beforeEach(() => {
@@ -46,116 +33,155 @@ beforeEach(() => {
   jest.setSystemTime(NOW);
   originalFetch = global.fetch;
   global.fetch = jest.fn();
-  mockGoogleMounts.length = 0;
+  mockGoogle.options = null;
+  mockGoogle.popups = 0;
+  mockGoogle.ready = true;
   googleLogout.mockClear();
 });
 afterEach(() => {
   global.fetch = originalFetch;
   jest.useRealTimers();
 });
-const latestGoogle = () => mockGoogleMounts[mockGoogleMounts.length - 1];
-const signIn = async (response = successResponse()) => {
-  global.fetch.mockResolvedValueOnce(response);
-  await act(async () => { await latestGoogle().success({ credential: 'synthetic-proof-a' }); });
+const popupReturns = async (result = { code: '4/synthetic-code' }) => {
+  await act(async () => { await mockGoogle.options.onSuccess(result); });
+};
+const signIn = async (verify = successResponse(), credential = 'synthetic-proof-a') => {
+  fireEvent.click(screen.getByRole('button', { name: 'Sign in with Google' }));
+  global.fetch.mockResolvedValueOnce(exchanged(credential)).mockResolvedValueOnce(verify);
+  await popupReturns();
 };
 
-it('shows requested anonymous note and only greets after server verification', async () => {
-  const pending = deferred();
-  global.fetch.mockReturnValueOnce(pending.promise);
+it('opens the Google code popup and only greets after server verification', async () => {
   render(<AccountHarness />);
   expect(screen.getByText('Sign in to save your routes and locations.')).toBeVisible();
-  expect(latestGoogle().props).toMatchObject({ useOneTap: false, auto_select: false });
-  fireEvent.click(screen.getByRole('button', { name: 'Fixture Google sign-in' }));
+  expect(mockGoogle.options.flow).toBe('auth-code');
+  fireEvent.click(screen.getByRole('button', { name: 'Sign in with Google' }));
+  expect(mockGoogle.popups).toBe(1);
+  expect(global.fetch).not.toHaveBeenCalled();
+  const pending = deferred();
+  global.fetch.mockResolvedValueOnce(exchanged()).mockReturnValueOnce(pending.promise);
+  let signing;
+  act(() => { signing = mockGoogle.options.onSuccess({ code: '4/synthetic-code' }); });
+  await act(async () => { for (let tick = 0; tick < 5; tick += 1) await Promise.resolve(); });
+  expect(global.fetch).toHaveBeenCalledTimes(2);
+  expect(global.fetch.mock.calls[0][0]).toMatch(/\/auth\/google-code$/);
   expect(screen.getByRole('status')).toHaveTextContent('Verifying your sign-in');
   expect(screen.getByRole('region', { name: 'Google account' })).toHaveAttribute('aria-busy', 'true');
   expect(screen.queryByRole('button', { name: 'Cancel' })).not.toBeInTheDocument();
   expect(screen.queryByText('Hello, Fixture')).not.toBeInTheDocument();
-  await act(async () => { pending.resolve(successResponse()); await pending.promise; });
+  await act(async () => { pending.resolve(successResponse()); await signing; });
   expect(screen.getByText('Hello, Fixture')).toBeVisible();
   expect(screen.getByRole('button', { name: 'Log out' })).toBeVisible();
   expect(screen.getByText('Signed in for this tab. Refreshing requires sign-in again.')).toBeVisible();
 });
 
+it('keeps sign-in disabled until the Google script has loaded', () => {
+  mockGoogle.ready = false;
+  const { rerender } = render(<AccountHarness />);
+  expect(screen.getByRole('button', { name: 'Sign in with Google' })).toBeDisabled();
+  mockGoogle.ready = true;
+  rerender(<AccountHarness />);
+  expect(screen.getByRole('button', { name: 'Sign in with Google' })).toBeEnabled();
+});
+
+it('a closed popup reports an incomplete sign-in without calling the backend', async () => {
+  render(<AccountHarness />);
+  fireEvent.click(screen.getByRole('button', { name: 'Sign in with Google' }));
+  act(() => { mockGoogle.options.onNonOAuthError({ type: 'popup_closed' }); });
+  expect(screen.getByRole('alert')).toHaveTextContent('Sign-in was not completed');
+  expect(global.fetch).not.toHaveBeenCalled();
+});
+
 it('shows an accessible invalid-proof error without a greeting or retry', async () => {
   render(<AccountHarness />);
-  await signIn({ ok: false, status: 401 });
+  await signIn(reply(401));
   expect(screen.getByRole('alert')).toHaveTextContent('Sign-in failed');
   expect(screen.queryByText('Hello, Fixture')).not.toBeInTheDocument();
   expect(screen.queryByRole('button', { name: 'Retry verification' })).not.toBeInTheDocument();
-  expect(screen.getByRole('button', { name: 'Fixture Google sign-in' })).toBeVisible();
+  expect(screen.getByRole('button', { name: 'Sign in with Google' })).toBeVisible();
 });
 
-it('temporary outage shows explicit retry and preserves the reviewed no-Cancel UI', async () => {
+it('an exchange outage asks for a fresh sign-in because codes are single-use', async () => {
   render(<AccountHarness />);
-  await signIn({ ok: false, status: 503 });
+  fireEvent.click(screen.getByRole('button', { name: 'Sign in with Google' }));
+  global.fetch.mockResolvedValueOnce(reply(503));
+  await popupReturns();
+  expect(screen.getByRole('alert')).toHaveTextContent('temporarily unavailable');
+  expect(screen.queryByRole('button', { name: 'Retry verification' })).not.toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Sign in with Google' })).toBeVisible();
+});
+
+it('temporary verification outage shows explicit retry and preserves the reviewed no-Cancel UI', async () => {
+  render(<AccountHarness />);
+  await signIn(reply(503));
   expect(screen.getByRole('alert')).toHaveTextContent('temporarily unavailable');
   expect(screen.queryByRole('button', { name: 'Cancel' })).not.toBeInTheDocument();
   expect(screen.queryByRole('button', { name: 'Log out' })).not.toBeInTheDocument();
   global.fetch.mockResolvedValueOnce(successResponse());
   await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Retry verification' })); });
   expect(screen.getByText('Hello, Fixture')).toBeVisible();
-  expect(global.fetch.mock.calls[1][1].headers.Authorization).toBe('Bearer synthetic-proof-a');
+  expect(global.fetch.mock.calls[2][1].headers.Authorization).toBe('Bearer synthetic-proof-a');
 });
 
-it('optional name falls back to a verified-account greeting and logout remounts GIS', async () => {
+it('optional name falls back to a verified-account greeting; a popup result after logout is ignored', async () => {
   render(<AccountHarness />);
-  const originalGoogle = latestGoogle();
   await signIn(successResponse(null));
   expect(screen.getByText('Signed in with Google')).toBeVisible();
   expect(screen.queryByText(/Hello, undefined/)).not.toBeInTheDocument();
   fireEvent.click(screen.getByRole('button', { name: 'Log out' }));
   expect(googleLogout).toHaveBeenCalledTimes(1);
-  expect(originalGoogle.unmounted).toBe(true);
-  expect(latestGoogle()).not.toBe(originalGoogle);
   expect(screen.getByText('Sign in to save your routes and locations.')).toBeVisible();
   const calls = global.fetch.mock.calls.length;
-  await act(async () => { await originalGoogle.success({ credential: 'late-old-proof' }); originalGoogle.error(); });
+  await popupReturns({ code: '4/late-old-code' });
+  act(() => { mockGoogle.options.onError({ error: 'access_denied' }); });
   expect(global.fetch).toHaveBeenCalledTimes(calls);
   expect(screen.queryByRole('alert')).not.toBeInTheDocument();
 });
 
-it('retained Google A callbacks cannot replace or reject newly verified B', async () => {
+it('a late popup result from A cannot replace or reject newly verified B', async () => {
   render(<AccountHarness />);
-  const oldGoogle = latestGoogle();
   await signIn();
   fireEvent.click(screen.getByRole('button', { name: 'Log out' }));
-  await signIn(successResponse('Second account', NOW / 1000 + 3600, 'synthetic-account-b'));
+  await signIn(successResponse('Second account', NOW / 1000 + 3600, 'synthetic-account-b'), 'synthetic-proof-b');
   const calls = global.fetch.mock.calls.length;
-  await act(async () => { await oldGoogle.success({ credential: 'late-a-proof' }); oldGoogle.error(); });
+  await popupReturns({ code: '4/late-a-code' });
+  act(() => { mockGoogle.options.onNonOAuthError({ type: 'popup_closed' }); });
   expect(global.fetch).toHaveBeenCalledTimes(calls);
   expect(screen.getByText('Hello, Second account')).toBeVisible();
   expect(screen.queryByRole('alert')).not.toBeInTheDocument();
 });
 
-it('expiry clears greeting and remounts explicit Google sign-in', async () => {
+it('expiry clears greeting and offers sign-in again', async () => {
   render(<AccountHarness />);
   await signIn(successResponse('Fixture', NOW / 1000 + 1));
   act(() => { jest.advanceTimersByTime(1000); });
   expect(screen.queryByText('Hello, Fixture')).not.toBeInTheDocument();
   expect(screen.getByRole('alert')).toHaveTextContent('sign-in expired');
-  expect(screen.getByRole('button', { name: 'Fixture Google sign-in' })).toBeVisible();
+  expect(screen.getByRole('button', { name: 'Sign in with Google' })).toBeVisible();
 });
 
-it('a retained callback from unmounted hook cannot restore sign-in', async () => {
+it('a popup result for an unmounted hook cannot restore sign-in', async () => {
   const pending = deferred();
   global.fetch.mockReturnValueOnce(pending.promise);
   const { result, unmount } = renderHook(() => useGoogleProfile());
-  const oldCallback = result.current.onGoogleSuccess;
+  act(() => { result.current.signIn(); });
+  const onSuccess = mockGoogle.options.onSuccess;
   let signing;
-  act(() => { signing = oldCallback({ credential: 'synthetic-proof-a' }); });
+  act(() => { signing = onSuccess({ code: '4/synthetic-code' }); });
   const signal = global.fetch.mock.calls[0][1].signal;
   unmount();
   expect(signal.aborted).toBe(true);
-  pending.resolve(successResponse());
+  pending.resolve(exchanged());
   await signing;
-  await oldCallback({ credential: 'late-old-proof' });
+  await onSuccess({ code: '4/late-old-code' });
   expect(global.fetch).toHaveBeenCalledTimes(1);
 });
 
 it('fresh hook after unmount starts anonymous and leaves no expiry timer', async () => {
   const { result, unmount } = renderHook(() => useGoogleProfile());
-  global.fetch.mockResolvedValueOnce(successResponse());
-  await act(async () => { await result.current.onGoogleSuccess({ credential: 'synthetic-proof-a' }); });
+  act(() => { result.current.signIn(); });
+  global.fetch.mockResolvedValueOnce(exchanged()).mockResolvedValueOnce(successResponse());
+  await popupReturns();
   expect(result.current.profile.id).toBe('google:synthetic-fixture');
   expect(jest.getTimerCount()).toBe(1);
   unmount();
@@ -167,7 +193,8 @@ it('fresh hook after unmount starts anonymous and leaves no expiry timer', async
 it('StrictMode effect remount does not authenticate or call the backend automatically', async () => {
   render(<React.StrictMode><AccountHarness /></React.StrictMode>);
   expect(global.fetch).not.toHaveBeenCalled();
+  expect(mockGoogle.popups).toBe(0);
   await signIn();
-  expect(global.fetch).toHaveBeenCalledTimes(1);
+  expect(global.fetch).toHaveBeenCalledTimes(2);
   expect(screen.getByText('Hello, Fixture')).toBeVisible();
 });

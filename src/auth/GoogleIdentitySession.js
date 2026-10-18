@@ -62,6 +62,47 @@ export default class GoogleIdentitySession {
     await this.verifyCandidate(this.generation);
   }
 
+  // The code popup works where the ID-token button's handoff is blocked (iPhone Safari).
+  async acceptCode(response, generation) {
+    if (generation !== this.generation || this.state.status === 'authenticated') return;
+    this.clear();
+    if (typeof response?.code !== 'string' || !response.code) {
+      this.publish({ status: 'anonymous', profile: null, error: 'Sign-in failed. Please try again.', retryable: false });
+      return;
+    }
+    const exchange = this.generation;
+    const controller = new AbortController();
+    this.controllers.add(controller);
+    this.publish({ status: 'verifying', profile: null, error: '', retryable: false });
+    let credential;
+    try {
+      const reply = await this.fetchImpl(`${this.apiUrl}/auth/google-code`, {
+        method: 'POST', credentials: 'omit', cache: 'no-store', signal: controller.signal,
+        headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XmlHttpRequest' },
+        body: JSON.stringify({ code: response.code }),
+      });
+      if (exchange !== this.generation) return;
+      if (reply.status === 503) throw new Error('unavailable');
+      const body = reply.ok ? await reply.json() : null;
+      if (exchange !== this.generation) return;
+      if (body?.status !== 'success' || typeof body.credential !== 'string' || !body.credential) {
+        this.clear('Sign-in failed. Please sign in again.');
+        return;
+      }
+      credential = body.credential;
+    } catch (error) {
+      if (exchange !== this.generation || controller.signal.aborted) return;
+      // A code is single-use, so recovery is a fresh sign-in rather than a retry.
+      this.publish({ status: 'anonymous', profile: null,
+        error: 'Sign-in is temporarily unavailable. Please try again.', retryable: false });
+      return;
+    } finally {
+      this.controllers.delete(controller);
+    }
+    this.candidate = credential;
+    await this.verifyCandidate(exchange);
+  }
+
   retry = () => {
     if (this.state.retryable && this.candidate) return this.verifyCandidate(this.generation);
     return Promise.resolve();

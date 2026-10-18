@@ -261,3 +261,66 @@ it('default timers run unbound, as browsers require', async () => {
     browser.clear();
   }
 });
+
+const exchanged = (credential = 'synthetic-proof-a') => response(200, { status: 'success', credential });
+
+it('exchanges a popup code, then verifies the returned ID token as before', async () => {
+  fetchImpl.mockResolvedValueOnce(exchanged()).mockResolvedValueOnce(response());
+  await session.acceptCode({ code: '4/synthetic-code' }, 0);
+  expect(fetchImpl.mock.calls[0]).toEqual(['https://synthetic-api.example/auth/google-code', expect.objectContaining({
+    method: 'POST', credentials: 'omit', cache: 'no-store', body: JSON.stringify({ code: '4/synthetic-code' }),
+    headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XmlHttpRequest' },
+  })]);
+  expect(fetchImpl.mock.calls[1][0]).toBe('https://synthetic-api.example/auth/verify');
+  expect(fetchImpl.mock.calls[1][1].headers).toEqual({ Authorization: 'Bearer synthetic-proof-a' });
+  expect(session.getSnapshot()).toMatchObject({ status: 'authenticated', profile: { id: 'google:fixture-a', given_name: 'A' } });
+  expect(JSON.stringify(session.getSnapshot())).not.toContain('synthetic-proof-a');
+});
+
+it.each([
+  ['a missing code', undefined, null, 'Sign-in failed. Please try again.'],
+  ['a rejected code', '4/c', () => response(401), 'Sign-in failed. Please sign in again.'],
+  ['a malformed exchange reply', '4/c', () => response(200, { status: 'success' }), 'Sign-in failed. Please sign in again.'],
+  ['an exchange outage', '4/c', () => response(503), 'Sign-in is temporarily unavailable. Please try again.'],
+  ['a network failure', '4/c', () => Promise.reject(new Error('synthetic')), 'Sign-in is temporarily unavailable. Please try again.'],
+])('%s leaves the user signed out without verifying', async (_name, code, reply, message) => {
+  if (reply) fetchImpl.mockImplementationOnce(reply);
+  await session.acceptCode(code === undefined ? {} : { code }, 0);
+  expect(session.getSnapshot()).toMatchObject({ status: 'anonymous', profile: null, error: message, retryable: false });
+  expect(fetchImpl).toHaveBeenCalledTimes(reply ? 1 : 0);
+});
+
+it('a verification outage after the exchange can be retried with the exchanged token', async () => {
+  fetchImpl.mockResolvedValueOnce(exchanged()).mockResolvedValueOnce(response(503)).mockResolvedValueOnce(response());
+  await session.acceptCode({ code: '4/c' }, 0);
+  expect(session.getSnapshot()).toMatchObject({ status: 'anonymous', retryable: true });
+  await session.retry();
+  expect(fetchImpl.mock.calls[2][1].headers).toEqual({ Authorization: 'Bearer synthetic-proof-a' });
+  expect(session.getSnapshot()).toMatchObject({ status: 'authenticated' });
+});
+
+it('logout during the exchange aborts it and ignores the late reply', async () => {
+  const pending = deferred();
+  fetchImpl.mockReturnValueOnce(pending.promise);
+  const signing = session.acceptCode({ code: '4/c' }, 0);
+  expect(session.getSnapshot()).toMatchObject({ status: 'verifying' });
+  const signal = fetchImpl.mock.calls[0][1].signal;
+  session.logout();
+  expect(signal.aborted).toBe(true);
+  pending.resolve(exchanged());
+  await signing;
+  await session.acceptCode({ code: '4/late' }, 0);
+  expect(fetchImpl).toHaveBeenCalledTimes(1);
+  expect(session.getSnapshot()).toMatchObject({ status: 'anonymous', error: '' });
+});
+
+it('a late exchange for A cannot replace signed-in B', async () => {
+  const pending = deferred();
+  fetchImpl.mockReturnValueOnce(pending.promise);
+  const signing = session.acceptCode({ code: '4/a' }, 0);
+  await switchToB();
+  pending.resolve(exchanged('synthetic-proof-a'));
+  await signing;
+  expect(session.getSnapshot()).toMatchObject({ status: 'authenticated', profile: { id: 'google:fixture-b' } });
+  expect(fetchImpl).toHaveBeenCalledTimes(2);
+});

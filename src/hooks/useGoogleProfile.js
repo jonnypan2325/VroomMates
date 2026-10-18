@@ -1,5 +1,5 @@
-import { useEffect, useState, useSyncExternalStore } from 'react';
-import { googleLogout } from '@react-oauth/google';
+import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
+import { googleLogout, useGoogleLogin, useGoogleOAuth } from '@react-oauth/google';
 import GoogleIdentitySession from '../auth/GoogleIdentitySession';
 
 /** Only a verified server response makes this tab authenticated. */
@@ -10,12 +10,23 @@ export default function useGoogleProfile() {
   }));
   const state = useSyncExternalStore(session.subscribe, session.getSnapshot);
   useEffect(() => () => session.clear(), [session]);
-  // GoogleLogin must be remounted on generation changes; its callback refs otherwise drift.
-  const generation = state.generation;
+  // A popup's result belongs to the generation that opened it; later ones are ignored.
+  const opened = useRef(null);
+  // Until Google's script loads, a sign-in click would silently do nothing.
+  const { scriptLoadedSuccessfully } = useGoogleOAuth();
+  const requestCode = useGoogleLogin({
+    flow: 'auth-code',
+    onSuccess: (response) => session.acceptCode(response, opened.current),
+    onError: () => session.rejectGoogle(opened.current),
+    onNonOAuthError: () => session.rejectGoogle(opened.current),
+  });
   return {
     ...state,
-    onGoogleSuccess: (response) => session.acceptGoogle(response, generation),
-    onGoogleError: () => session.rejectGoogle(generation),
+    signInReady: scriptLoadedSuccessfully,
+    signIn: () => {
+      opened.current = session.getSnapshot().generation;
+      requestCode();
+    },
     logOut: session.logout,
     cancel: session.logout,
     retry: session.retry,
