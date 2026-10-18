@@ -69,7 +69,7 @@ def create_app(config=None):
     app.extensions["allowed_origins"] = allowed_origins
     CORS(app, origins=[re.compile(r"^" + re.escape(origin) + r"$") for origin in allowed_origins],
          allow_headers=["Authorization", "Content-Type", "X-Requested-With"],
-         methods=["GET", "POST", "DELETE", "OPTIONS"], supports_credentials=False,
+         methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"], supports_credentials=False,
          always_send=False, vary_header=True)
     app.logger.setLevel(logging.INFO)
     register_routes(app)

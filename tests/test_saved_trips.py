@@ -82,6 +82,13 @@ class FakeTripStore:
         self.called('delete', owner)
         return self.rows.pop((owner, ident), None) is not None
 
+    def update_trip(self, owner, ident, changes):
+        self.called('update', owner)
+        if (owner, ident) not in self.rows:
+            raise SavedNotFound()
+        self.rows[owner, ident].update(copy.deepcopy(changes))
+        return copy.deepcopy(self.override or self.rows[owner, ident])
+
 
 class SavedTripTests(unittest.TestCase):
     @classmethod
@@ -416,3 +423,74 @@ class SavedTripTests(unittest.TestCase):
             self.call('GET')
             self.call('DELETE', '/saved-trips/' + value['id'])
         info.assert_not_called(); error.assert_not_called()
+
+    def test_patch_renames_and_replaces_snapshot_keeping_identity(self):
+        value = payload()
+        self.assertEqual(self.call('POST', json=value).status_code, 201)
+        path = '/saved-trips/' + value['id']
+        renamed = self.call('PATCH', path, json={'title': '  Friday dinner  '})
+        self.assertEqual(renamed.status_code, 200)
+        self.assertEqual(renamed.headers['Cache-Control'], 'no-store')
+        self.assertEqual(renamed.json['trip']['title'], 'Friday dinner')
+        self.assertEqual(renamed.json['trip']['created_at'], STAMP)
+        self.assertEqual(renamed.json['trip']['snapshot'], validate_snapshot(value['snapshot']))
+        bigger = payload(value['id'], passengers=3)['snapshot']
+        both = self.call('PATCH', path, json={'title': 'Friday dinner', 'snapshot': bigger})
+        self.assertEqual(both.status_code, 200)
+        self.assertEqual(both.json['trip']['snapshot'], validate_snapshot(bigger))
+        loaded = self.call('GET', path).json['trip']
+        self.assertEqual((loaded['id'], loaded['title'], loaded['created_at']), (value['id'], 'Friday dinner', STAMP))
+        summary = self.call('GET').json['trips'][0]
+        self.assertEqual((summary['title'], summary['passenger_count']), ('Friday dinner', 3))
+        repeat = self.call('PATCH', path, json={'title': 'Friday dinner', 'snapshot': bigger})
+        self.assertEqual(repeat.json['trip'], both.json['trip'])
+
+    def test_patch_missing_foreign_and_malformed_ids_are_not_found(self):
+        value = payload()
+        self.call('POST', json=value)
+        path = '/saved-trips/' + value['id']
+        self.assert_error(self.call('PATCH', path, token=self.b, json={'title': 'Theirs'}), 404, 'TRIP_NOT_FOUND')
+        self.assert_error(self.call('PATCH', '/saved-trips/' + str(uuid.uuid4()), json={'title': 'X'}), 404, 'TRIP_NOT_FOUND')
+        self.assert_error(self.call('PATCH', '/saved-trips/not-a-uuid', json={'title': 'X'}), 404, 'TRIP_NOT_FOUND')
+        self.assertEqual(self.call('GET', path).json['trip']['title'], 'Fixture trip')
+
+    def test_patch_rejects_bad_bodies_before_the_store(self):
+        value = payload()
+        self.call('POST', json=value)
+        self.store.calls.clear()
+        path = '/saved-trips/' + value['id']
+        broken = copy.deepcopy(value['snapshot'])
+        broken['routes'][0]['stop_ids'].pop(1)
+        future = dict(copy.deepcopy(value['snapshot']), schema_version=2)
+        for body, code in [({}, 'INVALID_SAVE_REQUEST'),
+                           ({'id': value['id'], 'title': 'X'}, 'INVALID_SAVE_REQUEST'),
+                           ({'title': ''}, 'INVALID_SAVE_REQUEST'),
+                           ({'title': 'x' * 201}, 'INVALID_SAVE_REQUEST'),
+                           ({'title': 'X', 'created_at': STAMP}, 'INVALID_SAVE_REQUEST'),
+                           ({'snapshot': broken}, 'INVALID_SNAPSHOT'),
+                           ({'snapshot': future}, 'UNSUPPORTED_SNAPSHOT_VERSION')]:
+            with self.subTest(body=body):
+                self.assert_error(self.call('PATCH', path, json=body), 400, code)
+        self.assert_error(self.call('PATCH', path + '?x=1', json={'title': 'X'}), 400, 'INVALID_SAVE_REQUEST')
+        self.assertEqual(self.store.calls, [])
+
+    def test_patch_requires_identity_and_fails_closed_on_store_errors(self):
+        value = payload()
+        self.call('POST', json=value)
+        self.store.calls.clear()
+        path = '/saved-trips/' + value['id']
+        unauth = self.client.open(path, method='PATCH', json={'title': 'X'})
+        self.assert_error(unauth, 401, 'AUTH_REQUIRED')
+        self.assertEqual(self.store.calls, [])
+        self.store.fail = StoreUnavailable
+        self.assert_error(self.call('PATCH', path, json={'title': 'X'}), 503, 'STORE_UNAVAILABLE')
+        self.store.fail = None
+        self.store.override = dict(payload(value['id']), title='Something else', created_at=STAMP)
+        self.assert_error(self.call('PATCH', path, json={'title': 'X'}), 500, 'SAVED_TRIP_UNREADABLE')
+
+    def test_patch_preflight_is_allowed(self):
+        response = self.client.open('/saved-trips/' + str(uuid.uuid4()), method='OPTIONS', headers={
+            'Origin': 'https://synthetic.example', 'Access-Control-Request-Method': 'PATCH',
+            'Access-Control-Request-Headers': 'authorization,content-type'})
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('PATCH', response.headers['Access-Control-Allow-Methods'])

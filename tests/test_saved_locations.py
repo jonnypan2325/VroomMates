@@ -13,6 +13,7 @@ with patch('dotenv.load_dotenv', return_value=False):
     from tests import test_auth as auth_fixture
 
 STAMP = '2030-03-17T17:46:40.000000Z'
+LATER = '2030-03-18T09:00:00.000000Z'
 A = 'google:synthetic-account-a'
 B = 'google:synthetic-account-b'
 
@@ -65,6 +66,18 @@ class FixtureStore:
     def delete_location(self, owner, ident):
         self.call('delete', owner)
         return self.rows.pop((owner, ident), None) is not None
+
+    def update_location(self, owner, ident, changes):
+        self.call('update', owner)
+        if (owner, ident) not in self.rows:
+            raise SavedNotFound()
+        if 'label' in changes:
+            for (o, other), found in self.rows.items():
+                if o == owner and other != ident and found['label'].casefold() == changes['label'].casefold():
+                    raise SaveConflict('label', other)
+        found = self.rows[(owner, ident)]
+        found.update(copy.deepcopy(changes), updated_at=LATER)
+        return copy.deepcopy(found)
 
 
 class SavedLocationTests(unittest.TestCase):
@@ -278,7 +291,8 @@ class SavedLocationTests(unittest.TestCase):
                      dict(good, owner=B), dict(good, schema_version=True), dict(good, schema_version=2),
                      dict(good, label=' '+good['label']), dict(good, label=3),
                      dict(good, source={'kind': 'manual'}), dict(good, created_at='invalid'),
-                     dict(good, updated_at='2031-01-01T00:00:00Z'), dict(good, id=str(uuid.uuid4()))]
+                     dict(good, updated_at='2029-01-01T00:00:00Z'), dict(good, updated_at='invalid'),
+                     dict(good, id=str(uuid.uuid4()))]
         for index, broken in enumerate(mutations):
             with self.subTest(case=index):
                 self.store.rows[key] = broken
@@ -325,7 +339,7 @@ class SavedLocationTests(unittest.TestCase):
     def test_no_store_for_unsupported_method_preflight_and_error_paths(self):
         self.assertIs(self.app.extensions['saved_data_store'], self.store)
         path = '/saved-locations/' + str(uuid.uuid4())
-        unsupported = self.send('PATCH', path)
+        unsupported = self.send('PUT', path)
         self.error(unsupported, 405, 'METHOD_NOT_ALLOWED')
         self.assertEqual(unsupported.mimetype, 'application/json')
         self.assertIn('DELETE', unsupported.headers['Allow'])
@@ -356,3 +370,91 @@ class SavedLocationTests(unittest.TestCase):
             self.assertNotIn(marker, response.get_data(as_text=True))
             info.assert_not_called()
             error.assert_not_called()
+
+    def patch(self, ident, body, account='a', **kwargs):
+        return self.send('PATCH', '/saved-locations/' + ident, account=account, json=body, **kwargs)
+
+    def test_patch_renames_and_moves_source_keeping_identity(self):
+        value, _ = self.create()
+        renamed = self.patch(value['id'], {'label': '  Cafe\u0301 corner  '})
+        self.assertEqual(renamed.status_code, 200)
+        location = renamed.json['location']
+        self.assertEqual(location['id'], value['id'])
+        self.assertEqual(location['label'], 'Caf\u00e9 corner')
+        self.assertEqual(location['source'], value['source'])
+        self.assertEqual(location['created_at'], STAMP)
+        self.assertEqual(location['updated_at'], LATER)
+        moved = self.patch(value['id'], {'source': {'kind': 'google_places', 'place_id': 'synthetic-place-id-2'}})
+        self.assertEqual(moved.status_code, 200)
+        self.assertEqual(moved.json['location']['source']['place_id'], 'synthetic-place-id-2')
+        self.assertEqual(moved.json['location']['label'], 'Caf\u00e9 corner')
+        both = self.patch(value['id'], {'label': 'Home', 'source': value['source']})
+        self.assertEqual((both.json['location']['label'], both.json['location']['source']), ('Home', value['source']))
+        self.assertEqual(self.send('GET', '/saved-locations/' + value['id']).json['location']['label'], 'Home')
+
+    def test_patch_case_only_rename_is_allowed_but_other_labels_conflict(self):
+        first, _ = self.create(record(label='bcd tofu'))
+        second, _ = self.create(record(label='Home'))
+        self.assertEqual(self.patch(first['id'], {'label': 'BCD Tofu'}).json['location']['label'], 'BCD Tofu')
+        clash = self.patch(second['id'], {'label': 'bcd TOFU'})
+        self.error(clash, 409, 'LABEL_EXISTS')
+        self.assertEqual(clash.json['existing_location_id'], first['id'])
+        self.assertEqual(self.send('GET', '/saved-locations/' + second['id']).json['location']['label'], 'Home')
+
+    def test_patch_missing_foreign_and_malformed_ids_are_not_found(self):
+        value, _ = self.create()
+        self.error(self.patch(value['id'], {'label': 'Theirs'}, account='b'), 404, 'LOCATION_NOT_FOUND')
+        self.error(self.patch(str(uuid.uuid4()), {'label': 'Nobody'}), 404, 'LOCATION_NOT_FOUND')
+        self.error(self.patch('not-a-uuid', {'label': 'Nobody'}), 404, 'LOCATION_NOT_FOUND')
+        self.assertEqual(self.send('GET', '/saved-locations/' + value['id']).json['location']['label'], value['label'])
+
+    def test_patch_rejects_bad_bodies_before_the_store(self):
+        value, _ = self.create()
+        self.store.calls.clear()
+        ident = value['id']
+        for body, code in [({}, 'INVALID_LOCATION'),
+                           ({'id': ident, 'label': 'Home'}, 'INVALID_LOCATION'),
+                           ({'label': 'Home', 'note': 'x'}, 'INVALID_LOCATION'),
+                           ({'label': ''}, 'INVALID_LOCATION'),
+                           ({'label': 'x' * 81}, 'INVALID_LOCATION'),
+                           ({'label': 7}, 'INVALID_LOCATION'),
+                           ({'source': {'kind': 'google_places', 'place_id': 'has space'}}, 'INVALID_LOCATION'),
+                           ({'source': {'kind': 'other', 'place_id': 'p'}}, 'INVALID_LOCATION'),
+                           ({'label': 'Home', 'address': '1 Main St'}, 'PROVIDER_DATA_NOT_STORABLE'),
+                           ({'coordinates': {'lat': 1, 'lng': 2}}, 'PROVIDER_DATA_NOT_STORABLE')]:
+            with self.subTest(body=body):
+                self.error(self.patch(ident, body), 400, code)
+        self.error(self.send('PATCH', '/saved-locations/' + ident + '?x=1', json={'label': 'Home'}), 400, 'INVALID_QUERY')
+        self.error(self.send('PATCH', '/saved-locations/' + ident, data='{"label": "Home"}',
+                             headers={'Content-Type': 'text/plain'}), 415, 'UNSUPPORTED_MEDIA_TYPE')
+        self.assertEqual(self.store.calls, [])
+
+    def test_patch_requires_verified_identity_before_the_store(self):
+        value, _ = self.create()
+        self.store.calls.clear()
+        response = self.send('PATCH', '/saved-locations/' + value['id'], account=None, json={'label': 'Home'})
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(self.store.calls, [])
+
+    def test_patch_store_failures_and_mismatched_results_fail_closed(self):
+        value, _ = self.create()
+        self.store.error = StoreUnavailable()
+        self.error(self.patch(value['id'], {'label': 'Home'}), 503, 'STORE_UNAVAILABLE')
+        self.store.error = None
+        wrong = dict(value, label='Something else', schema_version=1, created_at=STAMP, updated_at=LATER)
+        with patch.object(self.store, 'update_location', return_value=wrong):
+            self.error(self.patch(value['id'], {'label': 'Home'}), 503, 'STORE_UNAVAILABLE')
+        backwards = dict(value, label='Home', schema_version=1, created_at=LATER, updated_at=STAMP)
+        with patch.object(self.store, 'update_location', return_value=backwards):
+            self.error(self.patch(value['id'], {'label': 'Home'}), 503, 'STORE_UNAVAILABLE')
+
+    def test_updated_records_are_listed_and_patch_preflight_is_allowed(self):
+        value, _ = self.create()
+        self.patch(value['id'], {'label': 'Home'})
+        listed = self.send('GET').json['locations']
+        self.assertEqual([(row['label'], row['updated_at']) for row in listed], [('Home', LATER)])
+        result = self.send('OPTIONS', '/saved-locations/' + value['id'], account=None, headers={
+            'Origin': 'https://synthetic.example', 'Access-Control-Request-Method': 'PATCH',
+            'Access-Control-Request-Headers': 'authorization,content-type'})
+        self.assertEqual(result.status_code, 200)
+        self.assertIn('PATCH', result.headers['Access-Control-Allow-Methods'])

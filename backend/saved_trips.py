@@ -201,6 +201,38 @@ def register_saved_trip_routes(app, store):
             raise SavedNotFound() from None
         return private_json({'trip': _public_record(store.get_trip(g.principal.owner_id, ident), ident)})
 
+    @app.patch('/saved-trips/<ident>')
+    @require_google_identity
+    @saved_errors('trip')
+    def update_saved_trip(ident):
+        if request.args:
+            raise SavedRequestError(400, 'INVALID_SAVE_REQUEST', 'Invalid saved-trip request.')
+        value = read_object(MAX_BODY_BYTES, 'INVALID_SAVE_REQUEST')
+        changes = {}
+        try:
+            if not value or not set(value) <= {'title', 'snapshot'}:
+                raise ValueError()
+            if 'title' in value:
+                changes['title'] = text(value['title'], 200, 200)
+        except ValueError:
+            raise SavedRequestError(400, 'INVALID_SAVE_REQUEST', 'Invalid saved-trip request.') from None
+        if 'snapshot' in value:
+            try:
+                changes['snapshot'] = validate_snapshot(value['snapshot'])
+            except UnsupportedSnapshotVersion:
+                raise SavedRequestError(400, 'UNSUPPORTED_SNAPSHOT_VERSION', 'Unsupported trip snapshot version.') from None
+            except ValueError:
+                raise SavedRequestError(400, 'INVALID_SNAPSHOT', 'Invalid trip snapshot.') from None
+        try:
+            canonical_uuid(ident)
+        except ValueError:
+            raise SavedNotFound() from None
+        # The later write wins: there is no revision check, and a repeated PATCH yields the same trip.
+        public = _public_record(store.update_trip(g.principal.owner_id, ident, changes), ident)
+        if any(public[key] != value for key, value in changes.items()):
+            raise StoreCorrupt()
+        return private_json({'trip': public})
+
     @app.delete('/saved-trips/<ident>')
     @require_google_identity
     @saved_errors('trip')

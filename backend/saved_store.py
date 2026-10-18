@@ -122,7 +122,7 @@ class FirestoreSavedStore:
             if (not isinstance(place_id, str) or not place_id or len(place_id.encode('utf-8')) > 4096
                     or any(c.isspace() or unicodedata.category(c).startswith('C') for c in place_id)):
                 raise ValueError()
-            if raw['created_at'] != raw['updated_at']:
+            if raw['updated_at'] < raw['created_at']:
                 raise ValueError()
             return {'id': snapshot.id, 'label': raw['label'], 'source': copy.deepcopy(raw['source']), 'schema_version': 1,
                     'created_at': _stamp(raw['created_at']), 'updated_at': _stamp(raw['updated_at'])}
@@ -147,6 +147,22 @@ class FirestoreSavedStore:
             tx.create(ref, raw)
             return dict(record, created_at=_stamp(stamp)), True
         return self._transaction(create)
+
+    def update_trip(self, owner, ident, changes):
+        changes = copy.deepcopy(changes)
+        ref = self._account(owner).collection('trips').document(ident)
+        def update(tx):
+            existing = self._trip(self._get(ref, tx))
+            raw = {}
+            if 'title' in changes:
+                raw['title'] = changes['title']
+            if 'snapshot' in changes:
+                inputs = changes['snapshot']['inputs']
+                raw.update(snapshot_json=_canonical(changes['snapshot']), driver_count=len(inputs['drivers']),
+                           passenger_count=len(inputs['passengers']))
+            tx.update(ref, raw)
+            return dict(existing, **changes)
+        return self._transaction(update)
 
     def get_trip(self, owner, ident):
         ref = self._account(owner).collection('trips').document(ident)
@@ -222,6 +238,32 @@ class FirestoreSavedStore:
             tx.set(account, {'schema_version': 1, 'location_labels': labels, 'location_count': count + 1}, merge=['schema_version', 'location_labels', 'location_count'])
             return dict(record, schema_version=1, created_at=_stamp(stamp), updated_at=_stamp(stamp)), True
         return self._transaction(create)
+
+    def update_location(self, owner, ident, changes):
+        changes = copy.deepcopy(changes)
+        account = self._account(owner)
+        ref = account.collection('locations').document(ident)
+        now = self.clock()
+        def update(tx):
+            found = self._get(ref, tx)
+            record = self._location(found)
+            old_key = _reservation_key(record['label'])
+            new_key = _reservation_key(changes.get('label', record['label']))
+            labels = None
+            if new_key != old_key:
+                labels, count = self._metadata(self._get(account, tx))
+                if labels.get(old_key) != ident: raise StoreCorrupt()
+                if new_key in labels: raise SaveConflict('label', labels[new_key])
+                del labels[old_key]
+                labels[new_key] = ident
+            # Never record an edit as earlier than the creation, even if clocks disagree.
+            stamp = max(now, found.to_dict()['created_at'])
+            tx.update(ref, dict(changes, updated_at=stamp))
+            if labels is not None:
+                tx.set(account, {'schema_version': 1, 'location_labels': labels, 'location_count': count},
+                       merge=['schema_version', 'location_labels', 'location_count'])
+            return dict(record, **changes, updated_at=_stamp(stamp))
+        return self._transaction(update)
 
     def get_location(self, owner, ident):
         ref = self._account(owner).collection('locations').document(ident)

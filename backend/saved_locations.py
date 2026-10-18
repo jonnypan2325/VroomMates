@@ -28,6 +28,32 @@ def _create_record(value):
         raise SavedRequestError(400, 'INVALID_LOCATION', 'Invalid saved location.') from None
 
 
+def _patch_changes(value):
+    """A PATCH names only the fields it replaces; ids and timestamps stay server-owned."""
+    if not value or not set(value) <= {'label', 'source'}:
+        code = ('PROVIDER_DATA_NOT_STORABLE' if any(
+            key in value for key in ('address', 'coordinates', 'geometry')) else 'INVALID_LOCATION')
+        raise SavedRequestError(400, code, 'Invalid saved location.')
+    try:
+        changes = {}
+        if 'label' in value:
+            changes['label'] = text(value['label'], 80, 320)
+        if 'source' in value:
+            changes['source'] = place_source(value['source'])
+        return changes
+    except (ValueError, TypeError):
+        raise SavedRequestError(400, 'INVALID_LOCATION', 'Invalid saved location.') from None
+
+
+def _instant(stamp):
+    if not isinstance(stamp, str) or not _TIMESTAMP.fullmatch(stamp):
+        raise ValueError()
+    parsed = datetime.fromisoformat(stamp.replace('Z', '+00:00'))
+    if parsed.tzinfo != timezone.utc:
+        raise ValueError()
+    return parsed
+
+
 def _public_record(value, expected_id=None):
     """Validate persisted shape before exposing it; never silently repair storage."""
     try:
@@ -40,13 +66,12 @@ def _public_record(value, expected_id=None):
                 or type(value['schema_version']) is not int or value['schema_version'] != 1
                 or (expected_id is not None and ident != expected_id)):
             raise ValueError()
-        stamp = value['created_at']
-        if (not isinstance(stamp, str) or not _TIMESTAMP.fullmatch(stamp)
-                or value['updated_at'] != stamp
-                or datetime.fromisoformat(stamp.replace('Z', '+00:00')).tzinfo != timezone.utc):
+        stamp, updated = value['created_at'], value['updated_at']
+        # An edited record is updated after it was created, never before.
+        if _instant(updated) < _instant(stamp):
             raise ValueError()
         return {'id': ident, 'label': label, 'source': source, 'schema_version': 1,
-                'created_at': stamp, 'updated_at': stamp, 'resolution_required': True}
+                'created_at': stamp, 'updated_at': updated, 'resolution_required': True}
     except (ValueError, TypeError, KeyError):
         raise StoreCorrupt() from None
 
@@ -114,6 +139,19 @@ def register_saved_location_routes(app, store):
         ident = _path_id(ident)
         stored = store.get_location(g.principal.owner_id, ident)
         return private_json({'status': 'success', 'location': _public_record(stored, ident)})
+
+    @app.patch('/saved-locations/<ident>')
+    @require_google_identity
+    @saved_errors('location')
+    def update_saved_location(ident):
+        if request.query_string:
+            raise SavedRequestError(400, 'INVALID_QUERY', 'Invalid saved-location query.')
+        changes = _patch_changes(read_object(MAX_BODY_BYTES, 'INVALID_LOCATION'))
+        ident = _path_id(ident)
+        public = _public_record(store.update_location(g.principal.owner_id, ident, changes), ident)
+        if any(public[key] != value for key, value in changes.items()):
+            raise StoreCorrupt()
+        return private_json({'status': 'success', 'location': public})
 
     @app.delete('/saved-locations/<ident>')
     @require_google_identity

@@ -1,5 +1,6 @@
 """Selected SDK integration tests; opt in only to the isolated loopback emulator."""
 import concurrent.futures
+import copy
 import os
 import subprocess
 import sys
@@ -161,6 +162,97 @@ class FirestoreStoreTests(unittest.TestCase):
         recovered = self.store.get_trip(self.owner, payload['id'])
         self.assertEqual(recovered['snapshot'], payload['snapshot'])
         self.assertFalse(self.store.create_trip(self.owner, payload)[1])
+
+    def test_location_update_moves_label_reservation(self):
+        home = location(label='Home')
+        work = location(label='Work')
+        self.store.create_location(self.owner, home)
+        self.store.create_location(self.owner, work)
+        renamed = self.store.update_location(self.owner, home['id'], {'label': 'Home base'})
+        self.assertEqual((renamed['id'], renamed['label'], renamed['source']), (home['id'], 'Home base', home['source']))
+        self.assertEqual(self.store.get_location(self.owner, home['id'])['label'], 'Home base')
+        reused, created = self.store.create_location(self.owner, location(label='home'))
+        self.assertTrue(created)
+        with self.assertRaises(SaveConflict) as result:
+            self.store.update_location(self.owner, work['id'], {'label': 'HOME BASE'})
+        self.assertEqual((result.exception.kind, result.exception.existing_id), ('label', home['id']))
+        cased = self.store.update_location(self.owner, home['id'], {'label': 'HOME BASE'})
+        self.assertEqual(cased['label'], 'HOME BASE')
+        moved = self.store.update_location(self.owner, work['id'], {'source': {'kind': 'google_places', 'place_id': 'synthetic-new-office'}})
+        self.assertEqual((moved['label'], moved['source']['place_id']), ('Work', 'synthetic-new-office'))
+        self.assertTrue(self.store.delete_location(self.owner, home['id']))
+        self.store.create_location(self.owner, location(label='Home base'))
+        self.assertEqual(len(self.store.list_locations(self.owner)), 3)
+        with self.assertRaises(SavedNotFound):
+            self.store.update_location(self.other, work['id'], {'label': 'Theirs'})
+        with self.assertRaises(SavedNotFound):
+            self.store.update_location(self.owner, str(uuid.uuid4()), {'label': 'Nobody'})
+
+    def test_trip_update_keeps_creation_and_recounts(self):
+        payload = trip()
+        created, _ = self.store.create_trip(self.owner, payload)
+        renamed = self.store.update_trip(self.owner, payload['id'], {'title': 'Friday dinner'})
+        self.assertEqual((renamed['title'], renamed['created_at']), ('Friday dinner', created['created_at']))
+        bigger = copy.deepcopy(payload['snapshot'])
+        bigger['inputs']['passengers'].append({'stop_id': 'q', 'source': {'kind': 'google_places', 'place_id': 'synthetic-second'}})
+        bigger['routes'][0]['stop_ids'] = ['d', 'p', 'q', 'z']
+        self.store.update_trip(self.owner, payload['id'], {'snapshot': bigger})
+        loaded = self.store.get_trip(self.owner, payload['id'])
+        self.assertEqual((loaded['title'], loaded['snapshot']), ('Friday dinner', bigger))
+        rows, _ = self.store.list_trips(self.owner, 5)
+        self.assertEqual((rows[0]['title'], rows[0]['passenger_count']), ('Friday dinner', 2))
+        with self.assertRaises(SavedNotFound):
+            self.store.update_trip(self.other, payload['id'], {'title': 'Theirs'})
+
+    def assert_reservations_match(self):
+        raw = self.store._account(self.owner).get().to_dict()
+        rows = self.store.list_locations(self.owner)
+        self.assertEqual(raw['location_count'], len(rows))
+        self.assertEqual(raw['location_labels'], {_reservation_key(row['label']): row['id'] for row in rows})
+
+    def test_failed_rename_mid_transaction_writes_nothing(self):
+        home, work = location(label='Home'), location(label='Work')
+        self.store.create_location(self.owner, home)
+        self.store.create_location(self.owner, work)
+        # The location update is queued first; the account write then fails, so the transaction rolls back.
+        with patch('google.cloud.firestore_v1.transaction.Transaction.set',
+                   side_effect=ServiceUnavailable('synthetic failure between writes')):
+            with self.assertRaises(StoreUnavailable):
+                self.store.update_location(self.owner, home['id'], {'label': 'Home base'})
+        self.assertEqual(self.store.get_location(self.owner, home['id'])['label'], 'Home')
+        self.assert_reservations_match()
+        with self.assertRaises(SaveConflict):
+            self.store.update_location(self.owner, work['id'], {'label': 'home'})
+        self.assertTrue(self.store.create_location(self.owner, location(label='Home base'))[1])
+        self.assert_reservations_match()
+
+    def test_concurrent_renames_to_one_label_keep_one_winner(self):
+        rows = [location(label='Spot %d' % index) for index in range(4)]
+        for row in rows:
+            self.store.create_location(self.owner, row)
+        def rename(row):
+            try:
+                self.store.update_location(self.owner, row['id'], {'label': 'Meeting point'})
+                return True
+            except SaveConflict as error:
+                self.assertEqual(error.kind, 'label')
+                return False
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+            results = list(pool.map(rename, rows))
+        self.assertEqual(sum(results), 1)
+        labels = sorted(row['label'] for row in self.store.list_locations(self.owner))
+        self.assertEqual(labels.count('Meeting point'), 1)
+        self.assert_reservations_match()
+
+    def test_failed_trip_update_mid_transaction_writes_nothing(self):
+        payload = trip()
+        self.store.create_trip(self.owner, payload)
+        with patch('google.cloud.firestore_v1.transaction.Transaction.update',
+                   side_effect=ServiceUnavailable('synthetic failure while writing')):
+            with self.assertRaises(StoreUnavailable):
+                self.store.update_trip(self.owner, payload['id'], {'title': 'Never saved'})
+        loaded = self.store.get_trip(self.owner, payload['id'])
+        self.assertEqual((loaded['title'], loaded['snapshot']), (payload['title'], payload['snapshot']))
 
     def test_new_backend_process_readback(self):
         payload = trip(); place = location()
