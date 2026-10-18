@@ -31,7 +31,7 @@ function messageFor(error) {
     case 'SAVE_IN_PROGRESS': return 'Another location save is in progress. Please wait.';
     case 'INVALID_LOCATION': return 'Use a label of 1–80 characters and choose a location from the address suggestions.';
     case 'INVALID_RESPONSE': return 'The response could not be confirmed. Please retry.';
-    case 'NOT_FOUND': return 'This location was already deleted. Refresh your locations.';
+    case 'LOCATION_NOT_FOUND': return 'This location was already deleted. Refresh your locations.';
     default: return 'Saved locations are temporarily unavailable. Please retry.';
   }
 }

@@ -375,3 +375,12 @@ it('a failed address lookup is retried the next time My locations is shown', asy
   await act(async () => { placeReplies['synthetic-place'](...found('1 Synthetic Home Road')); });
   expect(screen.getByRole('button', { name: 'Address of Home: 1 Synthetic Home Road. Press Enter to edit' })).toBeVisible();
 });
+
+it('editing a location deleted elsewhere says it was deleted, not that saving is unavailable', async () => {
+  const saved = fixtures({ edit: jest.fn().mockRejectedValue(new SavedApiError(404, 'LOCATION_NOT_FOUND', 'Saved item was not found.')) });
+  render(<SavedLocationsPanel auth={auth} saved={saved} activeView="locations" />);
+  fireEvent.doubleClick(screen.getByRole('button', { name: /^Name of saved location Home/ }));
+  fireEvent.change(screen.getByRole('textbox', { name: 'Name of saved location Home' }), { target: { value: 'Work' } });
+  await settle(() => fireEvent.keyDown(screen.getByRole('textbox', { name: 'Name of saved location Home' }), { key: 'Enter' }));
+  expect(screen.getByRole('alert')).toHaveTextContent('This location was already deleted. Refresh your locations.');
+});
