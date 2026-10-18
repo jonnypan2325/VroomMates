@@ -340,6 +340,7 @@ export default function SavedTripsPanel({ auth, snapshot, onLoad, onBeginLoad, o
     let body;
     try { body = { title: canonicalText(title, 200, 200), snapshot: canonicalSnapshot(snapshot) }; }
     catch (error) { setSaveError('Enter a route name of up to 200 bytes and select Google places for every route stop.'); return; }
+    const owner = scope;
     saveLock.current = true; setSaveBusy(true); setSaveError(''); setSaveSuccess('');
     try {
       const trip = await patchTrip(openedTrip.id, body);
@@ -348,6 +349,8 @@ export default function SavedTripsPanel({ auth, snapshot, onLoad, onBeginLoad, o
       setSaveSuccess(`Updated “${trip.title}”.`);
       setSaveOpen(false);
     } catch (error) {
+      // An account change aborts the request; the next owner must not see this owner's failure.
+      if (error?.name === 'AbortError' || currentScope.current !== owner) return;
       setSaveError(failureMessage(error, 'The update could not be confirmed. Please retry.'));
     } finally { saveLock.current = false; setSaveBusy(false); }
   };
@@ -357,10 +360,12 @@ export default function SavedTripsPanel({ auth, snapshot, onLoad, onBeginLoad, o
     let name;
     try { name = canonicalText(next, 200, 200); }
     catch (error) { setActionError('Use a trip name of up to 200 characters.'); throw error; }
+    const owner = scope;
     try {
       const updated = await patchTrip(trip.id, { title: name });
       if (updated) setActionSuccess(`Renamed to “${updated.title}”.`);
     } catch (error) {
+      if (error?.name === 'AbortError' || currentScope.current !== owner) throw error;
       setActionError(failureMessage(error, 'The new name could not be saved. Please retry.'));
       throw error;
     }

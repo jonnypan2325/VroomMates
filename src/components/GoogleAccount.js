@@ -16,20 +16,41 @@ export default function GoogleAccount({ auth }) {
   const trigger = useRef(null);
   const closeTimer = useRef(null);
   const [open, setOpen] = useState(false);
+  // A click pins the panel open; hover and keyboard focus only preview it.
+  const pinned = useRef(false);
+  // Focus from a pointer press is followed by its click; only keyboard focus previews the panel.
+  const lastInput = useRef('keyboard');
+  const returningFocus = useRef(false);
+  useEffect(() => {
+    const pointer = () => { lastInput.current = 'pointer'; };
+    const keyboard = () => { lastInput.current = 'keyboard'; };
+    document.addEventListener('pointerdown', pointer, true);
+    document.addEventListener('keydown', keyboard, true);
+    return () => {
+      document.removeEventListener('pointerdown', pointer, true);
+      document.removeEventListener('keydown', keyboard, true);
+    };
+  }, []);
   const signedIn = status === 'authenticated';
 
   useEffect(() => () => clearTimeout(closeTimer.current), []);
-  useEffect(() => { if (!signedIn) setOpen(false); }, [signedIn]);
+  useEffect(() => { if (!signedIn) { pinned.current = false; setOpen(false); } }, [signedIn]);
   useEffect(() => {
     if (!open) return undefined;
-    const outside = (event) => { if (!wrapper.current?.contains(event.target)) setOpen(false); };
+    const outside = (event) => {
+      if (!wrapper.current?.contains(event.target)) { pinned.current = false; setOpen(false); }
+    };
     document.addEventListener('pointerdown', outside);
     return () => document.removeEventListener('pointerdown', outside);
   }, [open]);
 
   const show = () => { clearTimeout(closeTimer.current); setOpen(true); };
   // A short delay lets the pointer cross the gap between the circle and the panel.
-  const hide = () => { clearTimeout(closeTimer.current); closeTimer.current = setTimeout(() => setOpen(false), 160); };
+  const hide = () => {
+    clearTimeout(closeTimer.current);
+    if (!pinned.current) closeTimer.current = setTimeout(() => setOpen(false), 160);
+  };
+  const close = () => { clearTimeout(closeTimer.current); pinned.current = false; setOpen(false); };
 
   if (status === 'verifying') {
     return <div className="account-circle account-verifying" role="status" aria-label="Verifying your sign-in">
@@ -49,10 +70,22 @@ export default function GoogleAccount({ auth }) {
     onPointerEnter={(event) => { if (event.pointerType === 'mouse') show(); }}
     onPointerLeave={(event) => { if (event.pointerType === 'mouse') hide(); }}
     onKeyDown={(event) => {
-      if (event.key === 'Escape' && open) { setOpen(false); trigger.current?.focus(); }
-    }}>
+      if (event.key === 'Escape' && open) {
+        close();
+        // Focus handed back after closing must not reopen the panel.
+        returningFocus.current = true;
+        trigger.current?.focus();
+        returningFocus.current = false;
+      }
+    }}
+    onBlur={(event) => { if (!wrapper.current?.contains(event.relatedTarget) && !pinned.current) close(); }}>
     <button type="button" ref={trigger} className="account-circle" aria-expanded={open} aria-controls={panelId}
-      aria-label={name ? `Account: ${name}` : 'Account'} onClick={() => setOpen((value) => !value)}>
+      aria-label={name ? `Account: ${name}` : 'Account'}
+      onFocus={() => { if (lastInput.current === 'keyboard' && !returningFocus.current) show(); }}
+      onClick={() => {
+        if (open && pinned.current) close();
+        else { clearTimeout(closeTimer.current); pinned.current = true; setOpen(true); }
+      }}>
       {name ? name.charAt(0).toUpperCase() : <svg aria-hidden="true" width="18" height="18" viewBox="0 0 20 20" fill="none">
         <circle cx="10" cy="7" r="3.25" stroke="currentColor" strokeWidth="1.5" />
         <path d="M3.75 16.5c1.2-2.7 3.4-4 6.25-4s5.05 1.3 6.25 4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
