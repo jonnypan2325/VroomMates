@@ -137,7 +137,13 @@ export default function SavedTripsPanel({ auth, snapshot, onLoad, onBeginLoad, o
   const [saveError, setSaveError] = useState('');
   const [saveSuccess, setSaveSuccess] = useState('');
   const [saveOpen, setSaveOpen] = useState(false);
+  // The last confirmed name and route, and the saved trip they belong to.
   const [confirmed, setConfirmed] = useState(null);
+  // Replies arrive after awaits, so they compare against the trip opened now, not at the click.
+  const openedRef = useRef(openedTrip);
+  openedRef.current = openedTrip;
+  const confirmedRef = useRef(confirmed);
+  confirmedRef.current = confirmed;
   const [list, setList] = useState(() => emptyList(scope));
   const tripsVisible = activeView === 'trips' || activeView === 'all';
   const tripsVisibleRef = useRef(tripsVisible);
@@ -257,7 +263,7 @@ export default function SavedTripsPanel({ auth, snapshot, onLoad, onBeginLoad, o
         throw new SavedApiError(409, 'TRIP_CONFLICT', 'The existing saved trip has different content.');
       }
       intentRef.current = null; setIntent(null);
-      setConfirmed({ scope, content: { title: attempt.body.title, snapshot: attempt.body.snapshot } });
+      setConfirmed({ scope, id: attempt.body.id, content: { title: attempt.body.title, snapshot: attempt.body.snapshot } });
       setSaveSuccess('Route saved. Find it in My trips.');
       setSaveOpen(false);
       onOpened?.({ id: attempt.body.id, title: attempt.body.title });
@@ -303,7 +309,7 @@ export default function SavedTripsPanel({ auth, snapshot, onLoad, onBeginLoad, o
       if (isCurrent(request)) {
         setActionSuccess('Trip loaded with fresh place details.');
         setTitle(trip.title); setSaveError(''); setSaveSuccess('');
-        setConfirmed({ scope, content: { title: trip.title, snapshot: trip.snapshot } });
+        setConfirmed({ scope, id: trip.id, content: { title: trip.title, snapshot: trip.snapshot } });
         onOpened?.({ id: trip.id, title: trip.title });
       }
     } catch (error) {
@@ -333,7 +339,7 @@ export default function SavedTripsPanel({ auth, snapshot, onLoad, onBeginLoad, o
       const summary = { title: trip.title, driver_count: trip.snapshot.inputs.drivers.length,
         passenger_count: trip.snapshot.inputs.passengers.length };
       setList((old) => ({ ...old, trips: old.trips.map((row) => row.id === id ? { ...row, ...summary } : row) }));
-      if (openedTrip?.id === id) onOpened?.({ id, title: trip.title });
+      if (openedRef.current?.id === id) onOpened?.({ id, title: trip.title });
       return trip;
     } finally { finishRequest(request); }
   };
@@ -348,7 +354,9 @@ export default function SavedTripsPanel({ auth, snapshot, onLoad, onBeginLoad, o
     try {
       const trip = await patchTrip(openedTrip.id, body);
       if (!trip) return;
-      setConfirmed({ scope, content: { title: trip.title, snapshot: trip.snapshot } });
+      if (openedRef.current?.id === trip.id) {
+        setConfirmed({ scope, id: trip.id, content: { title: trip.title, snapshot: trip.snapshot } });
+      }
       setSaveSuccess(`Updated “${trip.title}”.`);
       setSaveOpen(false);
     } catch (error) {
@@ -368,12 +376,14 @@ export default function SavedTripsPanel({ auth, snapshot, onLoad, onBeginLoad, o
       const updated = await patchTrip(trip.id, { title: name });
       if (!updated) return;
       setActionSuccess(`Renamed to “${updated.title}”.`);
-      if (openedTrip?.id === trip.id) {
+      if (openedRef.current?.id === trip.id) {
         // Carry the new name into the save form, so a later Update cannot write the old name back.
         // A name the user is still editing there is kept.
-        const previous = confirmed?.scope === scope ? confirmed.content.title : null;
+        const known = confirmedRef.current;
+        const previous = known?.scope === scope && known.id === trip.id ? known.content.title : null;
         setTitle((current) => (current === previous ? updated.title : current));
-        setConfirmed((old) => (old?.scope === scope ? { ...old, content: { ...old.content, title: updated.title } } : old));
+        setConfirmed((old) => (old?.scope === scope && old.id === trip.id
+          ? { ...old, content: { ...old.content, title: updated.title } } : old));
       }
     } catch (error) {
       if (error?.name === 'AbortError' || currentScope.current !== owner) throw error;
@@ -394,9 +404,9 @@ export default function SavedTripsPanel({ auth, snapshot, onLoad, onBeginLoad, o
       if (response !== null) throw new Error('Invalid delete response.');
       setList((old) => ({ ...old, trips: old.trips.filter((trip) => trip.id !== id), loading: false }));
       setDeleteId(null); setActionSuccess('Trip deleted.');
-      if (openedTrip?.id === id) {
+      if (openedRef.current?.id === id) {
         // The planner must stop editing a trip that no longer exists.
-        setConfirmed(null);
+        setConfirmed((old) => (old?.id === id ? null : old));
         onOpened?.(null);
       }
       returnFocus.current = true;

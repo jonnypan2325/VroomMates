@@ -458,3 +458,40 @@ test('deleting the opened trip stops the planner editing it', async () => {
   openSave();
   expect(screen.getByRole('button', { name: 'Save route' })).toBeEnabled();
 });
+
+test('a rename that lands after another trip opened leaves the newly opened trip alone', async () => {
+  const rename = deferred();
+  const transport = jest.fn(async (path, options) => {
+    if (path === '/saved-trips?limit=20') return response({ trips: [summary(), summary(OTHER_ID, 'Other trip')], next_cursor: null });
+    if (options.method === 'PATCH') return rename.promise;
+    return response(path.endsWith(OTHER_ID) ? detail(OTHER_ID, 'Other trip') : detail());
+  });
+  const auth = authFor(transport), onOpened = jest.fn(), load = jest.fn();
+  const view = await renderPanel(auth, { onLoad: load, onOpened });
+  const rerender = (openedTrip) => view.rerender(<SavedTripsPanel auth={auth} routeAvailable onLoad={load} onOpened={onOpened}
+    openedTrip={openedTrip} snapshot={snapshot()} />);
+  await click('Open Team trip');
+  rerender({ id: ID, title: 'Team trip' });
+  fireEvent.doubleClick(screen.getByRole('button', { name: /^Name of trip Team trip/ }));
+  const editor = screen.getByRole('textbox', { name: 'Name of trip Team trip' });
+  fireEvent.change(editor, { target: { value: 'New name' } });
+  fireEvent.keyDown(editor, { key: 'Enter' });
+  await click('Open Other trip');
+  rerender({ id: OTHER_ID, title: 'Other trip' });
+  await act(async () => { rename.resolve(response(detail(ID, 'New name'))); });
+  expect(onOpened).toHaveBeenLastCalledWith({ id: OTHER_ID, title: 'Other trip' });
+  openSave();
+  expect(screen.getByRole('textbox', { name: 'Route name' })).toHaveValue('Other trip');
+  expect(screen.getByRole('button', { name: 'No changes to save' })).toBeDisabled();
+});
+
+test('renaming the opened trip keeps a route name the user is still editing', async () => {
+  const { calls } = await openedTripPanel();
+  nameRoute('My draft name');
+  fireEvent.doubleClick(screen.getByRole('button', { name: /^Name of trip Team trip/ }));
+  const editor = screen.getByRole('textbox', { name: 'Name of trip Team trip' });
+  fireEvent.change(editor, { target: { value: 'Evening trip' } });
+  await settle(() => fireEvent.keyDown(editor, { key: 'Enter' }));
+  expect(calls('PATCH')).toHaveLength(1);
+  expect(screen.getByRole('textbox', { name: 'Route name' })).toHaveValue('My draft name');
+});
