@@ -67,6 +67,7 @@ it('opens the Google code popup and only greets after server verification', asyn
   render(<AccountHarness />);
   expect(screen.getByText('Sign in to save')).toBeVisible();
   expect(mockGoogle.options.flow).toBe('auth-code');
+  expect(mockGoogle.options.select_account).toBe(true);
   fireEvent.click(screen.getByRole('button', { name: 'Sign in with Google' }));
   expect(mockGoogle.popups).toBe(1);
   expect(global.fetch).not.toHaveBeenCalled();

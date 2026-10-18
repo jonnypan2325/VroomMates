@@ -16,6 +16,8 @@ export default function useGoogleProfile() {
   const { scriptLoadedSuccessfully } = useGoogleOAuth();
   const requestCode = useGoogleLogin({
     flow: 'auth-code',
+    // Logging out here leaves the Google session, so always offer the account chooser.
+    select_account: true,
     onSuccess: (response) => session.acceptCode(response, opened.current),
     onError: () => session.rejectGoogle(opened.current),
     onNonOAuthError: () => session.rejectGoogle(opened.current),
