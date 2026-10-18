@@ -309,7 +309,8 @@ function usePlaceAddresses(map, locations, active) {
     for (let index = 0; index < Math.min(3, pending.length); index += 1) void worker();
     return () => {
       controller.abort();
-      store.forEach((value, placeId) => { if (value.status === 'loading') store.delete(placeId); });
+      // Failed lookups are forgotten too, so the next time the list is shown retries them.
+      store.forEach((value, placeId) => { if (value.status !== 'ready') store.delete(placeId); });
     };
   }, [active, map, locations]);
   return (placeId) => cache.current.get(placeId) || { status: 'loading' };

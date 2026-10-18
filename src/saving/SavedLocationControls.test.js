@@ -361,3 +361,17 @@ it('an address edit commits only a chosen Google suggestion and sends only its p
   expect(screen.getByText('Home address updated.')).toBeVisible();
   expect(screen.queryByRole('textbox', { name: 'New address for Home' })).not.toBeInTheDocument();
 });
+
+it('a failed address lookup is retried the next time My locations is shown', async () => {
+  placesService();
+  const saved = fixtures();
+  const view = render(<SavedLocationsPanel auth={auth} saved={saved} map={map} activeView="locations" />);
+  await act(async () => { placeReplies['synthetic-place'](null, 'UNKNOWN_ERROR'); });
+  expect(screen.getByRole('button', { name: /^Address of Home: Address unavailable\./ })).toBeVisible();
+  delete placeReplies['synthetic-place'];
+  view.rerender(<SavedLocationsPanel auth={auth} saved={saved} map={map} activeView="plan" />);
+  view.rerender(<SavedLocationsPanel auth={auth} saved={saved} map={map} activeView="locations" />);
+  expect(placeReplies['synthetic-place']).toEqual(expect.any(Function));
+  await act(async () => { placeReplies['synthetic-place'](...found('1 Synthetic Home Road')); });
+  expect(screen.getByRole('button', { name: 'Address of Home: 1 Synthetic Home Road. Press Enter to edit' })).toBeVisible();
+});

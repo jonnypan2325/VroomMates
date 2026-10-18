@@ -6,9 +6,9 @@ import { resolvePlace } from './saving/places';
 
 jest.mock('./saving/places', () => ({ ...jest.requireActual('./saving/places'), resolvePlace: jest.fn() }));
 const mockHome = { id: 'saved-home', label: 'Home', source: { kind: 'google_places', place_id: 'home' } };
-const mockSaved = { locations: [mockHome], loading: false, save: jest.fn(), remove: jest.fn(), edit: jest.fn() };
+const mockSaved = { locations: [mockHome], loading: false, error: null, save: jest.fn(), remove: jest.fn(), edit: jest.fn() };
 jest.mock('./saving/useSavedLocations', () => () => ({
-  locations: mockSaved.locations, loading: mockSaved.loading, error: null, refresh: jest.fn().mockResolvedValue(),
+  locations: mockSaved.locations, loading: mockSaved.loading, error: mockSaved.error, refresh: jest.fn().mockResolvedValue(),
   save: (...args) => mockSaved.save(...args), remove: (...args) => mockSaved.remove(...args), edit: (...args) => mockSaved.edit(...args),
 }));
 jest.mock('./saving/SavedTripsPanel', () => function TripBoundary({ snapshot, openedTrip, onOpened }) {
@@ -46,6 +46,7 @@ beforeEach(() => {
   resolvePlace.mockReset();
   mockSaved.locations = [mockHome];
   mockSaved.loading = false;
+  mockSaved.error = null;
   mockSaved.save.mockReset(); mockSaved.remove.mockReset(); mockSaved.edit.mockReset();
 });
 afterEach(() => { delete global.fetch; delete window.google; });
@@ -334,4 +335,35 @@ test('a saved trip keeps only the nickname and place reference, never the landma
   expect(snapshot).not.toContain('Synthetic Landmark');
   expect(snapshot).not.toContain('saved_id');
   expect(snapshot).not.toContain('saved-home');
+});
+
+test('a failed list refresh still passes on a confirmed rename, but never unlinks a row', async () => {
+  resolvePlace.mockResolvedValue({ address: 'Home address', coordinates: { lat: 1, lng: 1 }, place_name: '', source: mockHome.source });
+  const view = show();
+  const again = () => view.rerender(<LocationInput auth={auth} map={map} directionsRenderer={renderer} />);
+  await useSaved('Driver 1 location');
+  mockSaved.error = 'My locations could not be refreshed.';
+  mockSaved.locations = [{ ...mockHome, label: 'Home base' }];
+  again();
+  expect(await screen.findByText('Driver 1 location nickname: Home base')).toBeInTheDocument();
+  mockSaved.locations = [];
+  again();
+  expect(screen.getByText('Driver 1 location nickname: Home base')).toBeInTheDocument();
+});
+
+test('a saved place that moves clears a calculated route through it, so it is calculated again', async () => {
+  resolvePlace.mockResolvedValue({ address: 'Home address', coordinates: { lat: 1, lng: 1 }, place_name: '', source: mockHome.source });
+  const view = show();
+  await useSaved('Driver 1 location');
+  fill('Pickup 1 location', 'Pickup'); fill('Destination', 'Destination');
+  fetch.mockResolvedValue(responseFor(1)); calculate();
+  await screen.findByRole('heading', { name: 'Your route' });
+  const moved = { kind: 'google_places', place_id: 'new-home' };
+  resolvePlace.mockResolvedValue({ address: 'New home address', coordinates: { lat: 2, lng: 2 }, place_name: '', source: moved });
+  mockSaved.locations = [{ ...mockHome, source: moved }];
+  await act(async () => { view.rerender(<LocationInput auth={auth} map={map} directionsRenderer={renderer} />); });
+  await waitFor(() => expect(screen.getByLabelText('Driver 1 location')).toHaveValue('New home address'));
+  expect(screen.queryByRole('heading', { name: 'Your route' })).not.toBeInTheDocument();
+  expect(screen.getByTestId('frozen-trip')).toHaveTextContent('null');
+  expect(screen.getByRole('alert')).toHaveTextContent('A saved place in this route moved');
 });

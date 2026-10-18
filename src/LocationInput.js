@@ -27,13 +27,14 @@ function listNames(names) {
 /** Planner rows picked from My locations follow later renames, moves and deletions there. */
 function SavedRowSync({ saved, map, drivers, passengers, destination, setDrivers, setPassengers, setDestination, onMove }) {
   useEffect(() => {
-    // A loading or failed list says nothing about deletions, so rows stay as they are.
-    if (saved.loading || saved.error) return undefined;
+    // Confirmed renames and moves always apply, but only a complete list proves a deletion:
+    // a loading or failed list keeps rows whose location is missing from it.
+    const complete = !saved.loading && !saved.error;
     const byId = new Map(saved.locations.map((row) => [row.id, row]));
     const relabel = (point) => {
       if (!point.saved_id) return point;
       const row = byId.get(point.saved_id);
-      if (!row) return { ...point, label: '', saved_id: null };
+      if (!row) return complete ? { ...point, label: '', saved_id: null } : point;
       if (row.source.place_id !== point.source?.place_id || row.label === point.label) return point;
       return { ...point, label: row.label };
     };
@@ -54,7 +55,7 @@ function SavedRowSync({ saved, map, drivers, passengers, destination, setDrivers
         const details = await resolvePlace(map, row.source.place_id, { signal: controller.signal });
         if (controller.signal.aborted) return;
         const follow = (point) => point.saved_id === savedId ? { ...point, ...details, label: row.label } : point;
-        onMove();
+        onMove(savedId);
         setDrivers((list) => list.map(follow));
         setPassengers((list) => list.map(follow));
         setDestination(follow);
@@ -109,6 +110,20 @@ export default function LocationInput({ map, directionsRenderer, auth }) {
     controllers.current.clear();
     setBusy(false);
   }, []);
+  const resultRef = useRef(result);
+  resultRef.current = result;
+  // A route calculated through a saved place that has since moved still visits the old place,
+  // so it is cleared and must be calculated again before it can be saved or updated.
+  const followSavedMove = useCallback((savedId) => {
+    invalidate();
+    const current = resultRef.current;
+    if (!current) return;
+    const { drivers: routeDrivers, passengers: routePassengers, destination: routeDestination } = current.inputs;
+    if (![...routeDrivers, ...routePassengers, routeDestination].some((point) => point.saved_id === savedId)) return;
+    setResult(null);
+    setSelectedDriver(0);
+    setError('A saved place in this route moved. Calculate the route again.');
+  }, [invalidate]);
 
   useLayoutEffect(() => {
     const previous = previousLifetime.current;
@@ -388,7 +403,7 @@ export default function LocationInput({ map, directionsRenderer, auth }) {
         <div className="planner">
           {auth.status === 'authenticated' && <SavedRowSync saved={saved} map={map} drivers={drivers} passengers={passengers}
             destination={destination} setDrivers={setDrivers} setPassengers={setPassengers} setDestination={setDestination}
-            onMove={invalidate} />}
+            onMove={followSavedMove} />}
           <div className="planner-nav" role="tablist" aria-label="Planner views">
             {[['plan', 'Plan trip'], ['trips', 'My trips'], ['locations', 'My locations']].map(([view, label]) => (
               <button key={view} type="button" role="tab" id={'planner-tab-' + view}
