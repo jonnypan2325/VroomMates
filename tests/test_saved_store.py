@@ -244,6 +244,32 @@ class FirestoreStoreTests(unittest.TestCase):
         self.assertEqual(labels.count('Meeting point'), 1)
         self.assert_reservations_match()
 
+    def test_failed_location_create_mid_transaction_writes_nothing(self):
+        self.store.create_location(self.owner, location(label='Home'))
+        payload = location(label='Work')
+        # The location create is queued first; the account write then fails, so neither lands.
+        with patch('google.cloud.firestore_v1.transaction.Transaction.set',
+                   side_effect=ServiceUnavailable('synthetic failure between writes')):
+            with self.assertRaises(StoreUnavailable):
+                self.store.create_location(self.owner, payload)
+        with self.assertRaises(SavedNotFound):
+            self.store.get_location(self.owner, payload['id'])
+        self.assert_reservations_match()
+        self.assertTrue(self.store.create_location(self.owner, payload)[1])
+        self.assert_reservations_match()
+
+    def test_failed_location_delete_mid_transaction_writes_nothing(self):
+        payload = location(label='Home')
+        self.store.create_location(self.owner, payload)
+        with patch('google.cloud.firestore_v1.transaction.Transaction.set',
+                   side_effect=ServiceUnavailable('synthetic failure between writes')):
+            with self.assertRaises(StoreUnavailable):
+                self.store.delete_location(self.owner, payload['id'])
+        self.assertEqual(self.store.get_location(self.owner, payload['id'])['label'], 'Home')
+        self.assert_reservations_match()
+        with self.assertRaises(SaveConflict):
+            self.store.create_location(self.owner, location(label='home'))
+
     def test_failed_trip_update_mid_transaction_writes_nothing(self):
         payload = trip()
         self.store.create_trip(self.owner, payload)

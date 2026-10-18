@@ -113,3 +113,25 @@ class SavedFirestoreHttpTests(unittest.TestCase):
         self.assertEqual(result.status_code, 503)
         self.assertEqual(result.json['code'], 'STORE_UNAVAILABLE')
         self.assertTrue(ref.get(retry=None, timeout=5).exists)
+
+    def test_patch_roundtrip_against_firestore(self):
+        home, work = store_fixture.location(label='Home'), store_fixture.location(label='Work')
+        for place in (home, work):
+            self.assertEqual(self.http.post('/saved-locations', json=place, headers=self.a).status_code, 201)
+        renamed = self.http.patch('/saved-locations/' + home['id'], json={'label': 'Home base'}, headers=self.a)
+        self.assertEqual(renamed.status_code, 200, renamed.get_json())
+        self.assertEqual(renamed.headers['Cache-Control'], 'no-store')
+        self.assertEqual(self.http.get('/saved-locations/' + home['id'], headers=self.a).json['location']['label'], 'Home base')
+        clash = self.http.patch('/saved-locations/' + work['id'], json={'label': 'home BASE'}, headers=self.a)
+        self.assertEqual((clash.status_code, clash.json['existing_location_id']), (409, home['id']))
+        self.assertEqual(self.http.patch('/saved-locations/' + home['id'], json={'label': 'Theirs'}, headers=self.b).status_code, 404)
+        self.assertEqual(self.http.post('/saved-locations', json=store_fixture.location(label='Home'), headers=self.a).status_code, 201)
+        trip = store_fixture.trip()
+        self.assertEqual(self.http.post('/saved-trips', json=trip, headers=self.a).status_code, 201)
+        updated = self.http.patch('/saved-trips/' + trip['id'], json={'title': 'Friday dinner'}, headers=self.a)
+        self.assertEqual(updated.status_code, 200, updated.get_json())
+        self.assertEqual(self.http.get('/saved-trips', headers=self.a).json['trips'][0]['title'], 'Friday dinner')
+        self.assertEqual(self.http.patch('/saved-trips/' + trip['id'], json={'title': 'Theirs'}, headers=self.b).status_code, 404)
+        preflight = self.http.options('/saved-locations/' + home['id'], headers={'Origin': 'http://localhost:3000',
+            'Access-Control-Request-Method': 'PATCH', 'Access-Control-Request-Headers': 'Authorization'})
+        self.assertIn('PATCH', preflight.headers['Access-Control-Allow-Methods'])
