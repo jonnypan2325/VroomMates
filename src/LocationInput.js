@@ -1,210 +1,549 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import AddressInput from './components/AddressInput';
+import SavedTripsPanel from './saving/SavedTripsPanel';
+import useSavedLocations from './saving/useSavedLocations';
+import { SavedLocationControls, SavedLocationsPanel } from './saving/SavedLocationControls';
+import { freezeInputs, makeResult, newDriver, newPoint, newPassengerPickup, resizePickup, expandPassengerPickups, groupPassengerPickups, reopenSnapshot } from './saving/tripSnapshot';
+import { hasCoordinates, resolvePlace } from './saving/places';
+import './saving/Saving.css';
 
-const API_BASE_URL = process.env.REACT_APP_FLASK_API_URL || 'http://127.0.0.1:5000';
-const ROUTE_OPTIMIZER_URL = `${API_BASE_URL}/routeoptimizer/`;
+const API_BASE_URL = (process.env.REACT_APP_FLASK_API_URL || 'http://127.0.0.1:5000').replace(/\/$/, '');
 
-const emptyCoordinates = () => ({ lat: null, lng: null });
-const newDriver = () => ({ address: '', capacity: 0, coordinates: emptyCoordinates() });
-const newPassenger = () => ({ address: '', coordinates: emptyCoordinates() });
+const placed = (points) => points.length > 0 && points.every((point) => hasCoordinates(point.coordinates));
 
-const hasCoordinates = ({ lat, lng }) => lat != null && lng != null;
-
-/** Returns a new list with `patch` merged into the item at `index`. */
-const updateAt = (list, index, patch) =>
-  list.map((item, i) => (i === index ? { ...item, ...patch } : item));
-
-function LocationInput({ map, directionsRenderer, setRouteData }) {
-  const [driverData, setDriverData] = useState([newDriver()]);
-  const [passengerLocs, setPassengerLocs] = useState([newPassenger()]);
-  const [destination, setDestination] = useState(newPassenger());
-  const [optimizedRoutes, setOptimizedRoutes] = useState([]);
-  const [selectedDriver, setSelectedDriver] = useState(0);
-  const [errorMessage, setErrorMessage] = useState('');
-
-  const displayRoutesForDriver = useCallback(
-    (route) => {
-      const [driver, ...stops] = route;
-      const finalStop = stops[stops.length - 1];
-      if (!driver || !finalStop || !directionsRenderer) return;
-
-      const waypoints = stops.slice(0, -1).map((stop) => ({
-        location: new window.google.maps.LatLng(stop.lat, stop.lng),
-        stopover: true,
-      }));
-
-      const directionsService = new window.google.maps.DirectionsService();
-      directionsService.route(
-        {
-          origin: new window.google.maps.LatLng(driver.lat, driver.lng),
-          destination: new window.google.maps.LatLng(finalStop.lat, finalStop.lng),
-          waypoints,
-          travelMode: window.google.maps.TravelMode.DRIVING,
-        },
-        (response, status) => {
-          if (status === 'OK') {
-            directionsRenderer.setDirections(response);
-          } else {
-            console.error(`Directions request failed: ${status}`);
-          }
-        }
-      );
-    },
-    [directionsRenderer]
-  );
-
-  useEffect(() => {
-    const route = optimizedRoutes[selectedDriver];
-    if (route) displayRoutesForDriver(route);
-  }, [optimizedRoutes, selectedDriver, displayRoutesForDriver]);
-
-  const handleDriverChange = useCallback(
-    (index, patch) => setDriverData((prev) => updateAt(prev, index, patch)),
-    []
-  );
-
-  const handlePassengerChange = useCallback(
-    (index, patch) => setPassengerLocs((prev) => updateAt(prev, index, patch)),
-    []
-  );
-
-  const handleCapacityChange = (index, rawValue) => {
-    const capacity = Number.parseInt(rawValue, 10);
-    handleDriverChange(index, { capacity: Number.isNaN(capacity) ? 0 : capacity });
-  };
-
-  const addDriver = () => setDriverData((prev) => [...prev, newDriver()]);
-  const addPassenger = () => setPassengerLocs((prev) => [...prev, newPassenger()]);
-
-  const requestOptimizedRoutes = async (drivers, passengers, destinationCoords) => {
-    try {
-      const response = await fetch(ROUTE_OPTIMIZER_URL, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ drivers, passengers, destination: destinationCoords }),
-      });
-
-      if (!response.ok) {
-        const errorBody = await response.json().catch(() => null);
-        const backendMessage = errorBody?.error || response.statusText || 'Unknown error';
-        setErrorMessage(`The route optimizer rejected the request: ${backendMessage}`);
-        return;
-      }
-
-      const result = await response.json();
-      if (!result.optimizedRoutes?.length) {
-        setErrorMessage('No optimized routes were returned. Please check your inputs and try again.');
-        return;
-      }
-
-      setSelectedDriver(0);
-      setOptimizedRoutes(result.optimizedRoutes);
-    } catch (error) {
-      console.error('Error sending coordinates to route optimizer:', error);
-      setErrorMessage(
-        'Could not reach the route optimizer service. Please make sure the backend is running and try again.'
-      );
-    }
-  };
-
-  const handleSubmit = () => {
-    setErrorMessage('');
-
-    const driverCoords = driverData.map((driver) => driver.coordinates);
-    const passengerCoords = passengerLocs.map((passenger) => passenger.coordinates);
-
-    const allComplete = [...driverCoords, ...passengerCoords, destination.coordinates].every(
-      hasCoordinates
-    );
-    if (!allComplete) {
-      setErrorMessage(
-        'Please enter a valid address for every driver, passenger, and the destination before submitting.'
-      );
-      return;
-    }
-
-    const drivers = driverCoords.map((coordinates, index) => ({
-      location: coordinates,
-      capacity: driverData[index].capacity,
-    }));
-
-    return requestOptimizedRoutes(drivers, passengerCoords, destination.coordinates);
-  };
-
-  return (
-    <div>
-      <h3>Driver Locations and Capacities</h3>
-      {driverData.map((driver, index) => (
-        <div key={index} className="driver-input-group">
-          <input
-            type="number"
-            inputMode="numeric"
-            min="1"
-            value={driver.capacity}
-            aria-label={`Driver ${index + 1} capacity`}
-            placeholder="Seats"
-            onChange={(event) => handleCapacityChange(index, event.target.value)}
-          />
-          <AddressInput
-            map={map}
-            value={driver.address}
-            label={`Driver ${index + 1} location`}
-            placeholder={`Driver ${index + 1} location`}
-            onChange={(patch) => handleDriverChange(index, patch)}
-          />
-        </div>
-      ))}
-      <button onClick={addDriver}>Add Driver</button>
-
-      <h3>Passenger Locations</h3>
-      {passengerLocs.map((passenger, index) => (
-        <div key={index} className="passenger-input-group">
-          <AddressInput
-            map={map}
-            value={passenger.address}
-            label={`Passenger ${index + 1} location`}
-            placeholder={`Passenger ${index + 1} location`}
-            onChange={(patch) => handlePassengerChange(index, patch)}
-          />
-        </div>
-      ))}
-      <button onClick={addPassenger}>Add Passenger</button>
-
-      <h3>Destination</h3>
-      <AddressInput
-        map={map}
-        className="full-width-input"
-        value={destination.address}
-        label="Destination"
-        placeholder="Destination"
-        onChange={(patch) => setDestination((prev) => ({ ...prev, ...patch }))}
-      />
-
-      <button className="submit-btn" onClick={handleSubmit}>
-        Submit All Locations
-      </button>
-
-      <h3>Driver View:</h3>
-      <select
-        className="full-width-input"
-        aria-label="Driver view"
-        value={selectedDriver}
-        onChange={(event) => setSelectedDriver(Number.parseInt(event.target.value, 10))}
-      >
-        {driverData.map((_, index) => (
-          <option key={index} value={index}>
-            {index + 1}
-          </option>
-        ))}
-      </select>
-
-      {errorMessage && (
-        <p className="error-message" role="alert">
-          {errorMessage}
-        </p>
-      )}
-    </div>
-  );
+function SectionHeading({ title, done, column }) {
+  return <div className="driver-section-heading">
+    <h3>{title}{done && <><svg className="section-done" aria-hidden="true" width="14" height="14" viewBox="0 0 16 16" fill="none">
+      <path d="m3.5 8.5 3 3 6-7" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" /></svg>
+      <span className="visually-hidden"> (complete)</span></>}
+      {column && <span className="section-column" aria-hidden="true">{column}</span>}</h3>
+  </div>;
 }
 
-export default LocationInput;
+function listNames(names) {
+  return names.join(', ');
+}
+
+/** Planner rows picked from My locations follow later renames, moves and deletions there. */
+function SavedRowSync({ saved, map, drivers, passengers, destination, setDrivers, setPassengers, setDestination, onMove }) {
+  useEffect(() => {
+    // Confirmed renames and moves always apply, but only a complete list proves a deletion:
+    // a loading or failed list keeps rows whose location is missing from it.
+    const complete = !saved.loading && !saved.error;
+    const byId = new Map(saved.locations.map((row) => [row.id, row]));
+    const relabel = (point) => {
+      if (!point.saved_id) return point;
+      const row = byId.get(point.saved_id);
+      if (!row) return complete ? { ...point, label: '', saved_id: null } : point;
+      if (row.source.place_id !== point.source?.place_id || row.label === point.label) return point;
+      return { ...point, label: row.label };
+    };
+    const relabelList = (list) => {
+      const next = list.map(relabel);
+      return next.some((point, index) => point !== list[index]) ? next : list;
+    };
+    setDrivers(relabelList);
+    setPassengers(relabelList);
+    setDestination(relabel);
+    const moved = new Set([...drivers, ...passengers, destination].filter((point) => point.saved_id
+      && byId.get(point.saved_id) && byId.get(point.saved_id).source.place_id !== point.source?.place_id)
+      .map((point) => point.saved_id));
+    const controller = new AbortController();
+    moved.forEach(async (savedId) => {
+      const row = byId.get(savedId);
+      // Any route through the old place is stale as soon as the move is known, even if the lookup fails.
+      onMove(savedId);
+      try {
+        const details = await resolvePlace(map, row.source.place_id, { signal: controller.signal });
+        if (controller.signal.aborted) return;
+        const follow = (point) => point.saved_id === savedId ? { ...point, ...details, label: row.label } : point;
+        onMove(savedId);
+        setDrivers((list) => list.map(follow));
+        setPassengers((list) => list.map(follow));
+        setDestination(follow);
+      } catch (_) { /* A failed or superseded lookup leaves the row at its last place. */ }
+    });
+    return () => controller.abort();
+  }, [saved.locations, saved.loading, saved.error, map, drivers, passengers, destination,
+    setDrivers, setPassengers, setDestination, onMove]);
+  return null;
+}
+
+function AccountBoundary({ auth, children }) {
+  const saved = useSavedLocations(auth);
+  return children(saved);
+}
+
+export default function LocationInput({ map, directionsRenderer, auth }) {
+  const [drivers, setDrivers] = useState(() => [newDriver()]);
+  const [passengers, setPassengers] = useState(() => [newPassengerPickup()]);
+  const [destination, setDestination] = useState(newPoint);
+  const [result, setResult] = useState(null);
+  const [selectedDriver, setSelectedDriver] = useState(0);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const [activeView, setActiveView] = useState('plan');
+  const [openedTrip, setOpenedTrip] = useState(null);
+  const [cleared, setCleared] = useState(null);
+  const scrollPane = useRef(null);
+  const addDriverButton = useRef(null);
+  const addPassengerButton = useRef(null);
+  const viewButtons = useRef({});
+  const [mapError, setMapError] = useState('');
+  const [mapBusy, setMapBusy] = useState(false);
+  const [mapAttempt, setMapAttempt] = useState(0);
+  const revision = useRef(0);
+  const operation = useRef(0);
+  const controllers = useRef(new Set());
+  const mounted = useRef(true);
+  const privateOwner = useRef(null);
+  const directionsEpoch = useRef(0);
+  const authKey = auth.status === 'authenticated' ? auth.profile.id + ':' + auth.generation : 'anonymous:' + auth.generation;
+  const latest = useRef({ authKey, map, directionsRenderer });
+  latest.current = { authKey, map, directionsRenderer, resultId: result?.id, selectedDriver, mapAttempt, activeView };
+  const previousLifetime = useRef({ authKey, map, directionsRenderer });
+  const privateStale = privateOwner.current && privateOwner.current !== authKey;
+
+  const invalidate = useCallback(() => {
+    setCleared(null); // Any new edit, load or account change ends the chance to undo a reset.
+    revision.current += 1;
+    operation.current += 1;
+    controllers.current.forEach((controller) => controller.abort());
+    controllers.current.clear();
+    setBusy(false);
+  }, []);
+  const resultRef = useRef(result);
+  resultRef.current = result;
+  // A route calculated through a saved place that has since moved still visits the old place,
+  // so it is cleared and must be calculated again before it can be saved or updated.
+  const followSavedMove = useCallback((savedId) => {
+    invalidate();
+    const current = resultRef.current;
+    if (!current) return;
+    const { drivers: routeDrivers, passengers: routePassengers, destination: routeDestination } = current.inputs;
+    if (![...routeDrivers, ...routePassengers, routeDestination].some((point) => point.saved_id === savedId)) return;
+    setResult(null);
+    setSelectedDriver(0);
+    setError('A saved place in this route moved. Calculate the route again.');
+  }, [invalidate]);
+
+  useLayoutEffect(() => {
+    const previous = previousLifetime.current;
+    if (previous.authKey !== authKey || previous.map !== map || previous.directionsRenderer !== directionsRenderer) {
+      previousLifetime.current = { authKey, map, directionsRenderer };
+      invalidate();
+      previous.directionsRenderer?.set('directions', null);
+      directionsEpoch.current += 1;
+      directionsRenderer?.set('directions', null);
+      setError('');
+      setMapError('');
+      if (previous.authKey !== authKey) setActiveView('plan');
+      if (privateOwner.current && privateOwner.current !== authKey) {
+        privateOwner.current = null;
+        setOpenedTrip(null);
+        setDrivers([newDriver()]);
+        setPassengers([newPassengerPickup()]);
+        setDestination(newPoint());
+        setResult(null);
+        setSelectedDriver(0);
+      }
+    }
+  }, [authKey, map, directionsRenderer, invalidate]);
+
+  useEffect(() => {
+    mounted.current = true;
+    const pendingControllers = controllers.current;
+    return () => {
+      mounted.current = false;
+      operation.current += 1;
+      directionsEpoch.current += 1;
+      pendingControllers.forEach((controller) => controller.abort());
+      pendingControllers.clear();
+      directionsRenderer?.set('directions', null);
+    };
+  }, [directionsRenderer]);
+
+  useEffect(() => {
+    const route = result?.coordinates[selectedDriver];
+    const epoch = ++directionsEpoch.current;
+    directionsRenderer?.set('directions', null);
+    setMapError('');
+    setMapBusy(false);
+    if (!route || privateStale) return undefined;
+    if (!map || !directionsRenderer || !window.google?.maps?.DirectionsService) {
+      setMapError('Maps is not ready. Retry when the map has loaded.');
+      return undefined;
+    }
+    const owner = authKey;
+    const renderer = directionsRenderer;
+    let finished = false;
+    const isCurrent = () => mounted.current && epoch === directionsEpoch.current &&
+      latest.current.authKey === owner && latest.current.directionsRenderer === renderer &&
+      latest.current.map === map && latest.current.resultId === result.id &&
+      latest.current.selectedDriver === selectedDriver && latest.current.mapAttempt === mapAttempt;
+    setMapBusy(true);
+    const timer = setTimeout(() => {
+      if (!isCurrent() || finished) return;
+      finished = true;
+      setMapBusy(false);
+      setMapError('Map directions timed out. Your route is still loaded. Please retry.');
+    }, 8000);
+    try {
+      const service = new window.google.maps.DirectionsService();
+      service.route({
+        origin: route[0], destination: route[route.length - 1],
+        waypoints: route.slice(1, -1).map((location) => ({ location, stopover: true })),
+        travelMode: window.google.maps.TravelMode.DRIVING,
+      }, (response, status) => {
+        if (!isCurrent() || finished) return;
+        finished = true;
+        clearTimeout(timer);
+        setMapBusy(false);
+        if (status === 'OK') renderer.setDirections(response);
+        else setMapError('Map directions are unavailable. Your route is still loaded. Please retry.');
+      });
+    } catch {
+      finished = true;
+      clearTimeout(timer);
+      setMapBusy(false);
+      setMapError('Map directions are unavailable. Your route assignments are unchanged.');
+    }
+    return () => { finished = true; clearTimeout(timer); directionsEpoch.current += 1; };
+  }, [result, selectedDriver, map, directionsRenderer, authKey, privateStale, mapAttempt]);
+
+  const edit = (setter, id, patch) => {
+    invalidate();
+    setError('');
+    setter((list) => list.map((point) => point.stop_id === id ? { ...point, ...patch } : point));
+  };
+  // A confirmed save names the row only if it still holds the place that was saved.
+  const nameSaved = (setter, id, row) => setter((list) => list.map((point) => point.stop_id === id
+    && point.source?.place_id === row.source.place_id ? { ...point, label: row.label, saved_id: row.id } : point));
+  const removePoint = (setter, id, addButton) => {
+    invalidate(); setError('');
+    setter((list) => list.filter((point) => point.stop_id !== id));
+    addButton.current?.focus();
+  };
+  const editDestination = (patch) => {
+    invalidate(); setError('');
+    setDestination((point) => ({ ...point, ...patch }));
+  };
+
+  // Clears the planner (and any opened trip) but never saved trips or locations; Undo restores it.
+  const startOver = () => {
+    const before = { drivers, passengers, destination, result, selectedDriver, openedTrip };
+    invalidate(); setError(''); setMapError('');
+    setOpenedTrip(null);
+    setDrivers([newDriver()]);
+    setPassengers([newPassengerPickup()]);
+    setDestination(newPoint());
+    setResult(null);
+    setSelectedDriver(0);
+    setCleared(before);
+    scrollPane.current?.scrollTo({ top: 0 });
+  };
+  const undoStartOver = () => {
+    if (!cleared) return;
+    invalidate();
+    setDrivers(cleared.drivers);
+    setPassengers(cleared.passengers);
+    setDestination(cleared.destination);
+    setResult(cleared.result);
+    setSelectedDriver(cleared.selectedDriver);
+    setOpenedTrip(cleared.openedTrip);
+  };
+  const filled = (point) => Boolean(point.address.trim() || point.source);
+  const dirty = Boolean(result || drivers.length !== 1 || passengers.length !== 1
+    || [...drivers, ...passengers, destination].some(filled));
+
+  const token = () => ({ owner: latest.current.authKey, revision: revision.current, operation: ++operation.current, map: latest.current.map });
+  const current = (captured) => mounted.current && captured.owner === latest.current.authKey &&
+    captured.revision === revision.current && captured.operation === operation.current && captured.map === latest.current.map;
+  const abortError = () => new DOMException('The current route or account changed.', 'AbortError');
+
+  const submit = async () => {
+    invalidate(); setError('');
+    if (!drivers.length) {
+      setError('Add at least one driver before calculating a route.');
+      addDriverButton.current?.focus();
+      return;
+    }
+    if (!passengers.length) {
+      setError('Add at least one passenger before calculating a route.');
+      addPassengerButton.current?.focus();
+      return;
+    }
+    if (drivers.length > 8) { setError('Plan with at most 8 drivers.'); return; }
+    let expanded;
+    try { expanded = expandPassengerPickups(passengers); }
+    catch (failure) { setError(failure.message); return; }
+    const inputs = freezeInputs(drivers, expanded, destination);
+    if (![...inputs.drivers, ...inputs.passengers, inputs.destination].every((point) => hasCoordinates(point.coordinates)) ||
+        inputs.drivers.some((point) => !Number.isSafeInteger(point.capacity) || point.capacity < 1)) {
+      setError('Choose a Google suggestion for every location and enter a positive seat count.');
+      return;
+    }
+    if (inputs.drivers.reduce((total, point) => total + point.capacity, 0) < inputs.passengers.length) {
+      setError('Add enough passenger seats for everyone at your pickups.'); return;
+    }
+    const captured = token();
+    const controller = new AbortController();
+    controllers.current.add(controller);
+    setBusy(true);
+    try {
+      const response = await fetch(API_BASE_URL + '/routeoptimizer/', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, signal: controller.signal,
+        body: JSON.stringify({
+          drivers: inputs.drivers.map((point) => ({ location: point.coordinates, capacity: point.capacity })),
+          passengers: inputs.passengers.map((point) => point.coordinates),
+          destination: inputs.destination.coordinates,
+        }),
+      });
+      if (!current(captured)) return;
+      let body = null;
+      // A gateway or proxy error page is not JSON; its status still says what went wrong.
+      try { body = await response.json(); } catch (_) { body = null; }
+      if (!current(captured)) return;
+      if (!response.ok) {
+        throw new Error(typeof body?.error === 'string' ? body.error : response.status >= 500
+          ? 'The route optimizer is unavailable. Please retry.' : 'The route could not be calculated. Please check your inputs.');
+      }
+      if (!body) throw new Error('The route optimizer sent an unreadable reply. Please retry.');
+      const frozen = makeResult(inputs, body.optimizedRoutes);
+      setResult(frozen);
+      setSelectedDriver(0);
+    } catch (failure) {
+      if (current(captured) && failure.name !== 'AbortError') setError(failure.message || 'Could not reach the route optimizer. Please retry.');
+    } finally {
+      controllers.current.delete(controller);
+      if (current(captured)) setBusy(false);
+    }
+  };
+
+  const beginLoad = () => {
+    invalidate(); setError('');
+    const captured = token();
+    setBusy(true);
+    return captured;
+  };
+  const endLoad = (captured) => { if (captured && current(captured)) setBusy(false); };
+  const loadTrip = async (snapshot, captured) => {
+    if (!captured || !current(captured)) throw abortError();
+    const controller = new AbortController();
+    controllers.current.add(controller);
+    setBusy(true);
+    try {
+      const restored = await reopenSnapshot(snapshot,
+        (placeId) => resolvePlace(map, placeId, { signal: controller.signal }));
+      if (!current(captured)) throw abortError();
+      privateOwner.current = captured.owner;
+      setDrivers(restored.inputs.drivers);
+      setPassengers(groupPassengerPickups(restored.inputs.passengers));
+      setDestination(restored.inputs.destination);
+      setResult(restored);
+      setSelectedDriver(0);
+      if (latest.current.activeView === 'trips') {
+        setActiveView('plan');
+        viewButtons.current.plan?.focus();
+      }
+    } finally {
+      controllers.current.delete(controller);
+      if (current(captured)) setBusy(false);
+    }
+  };
+
+  const selectPlace = async (record, point, setter, isDestination = false, append = false) => {
+    invalidate(); setError('');
+    const captured = token();
+    const controller = new AbortController();
+    controllers.current.add(controller);
+    try {
+      const details = await resolvePlace(map, record.source.place_id, { signal: controller.signal });
+      if (!current(captured)) throw abortError();
+      privateOwner.current = captured.owner;
+      const patch = { ...details, label: record.label, saved_id: record.id };
+      if (isDestination) setter((old) => old.stop_id === point.stop_id ? { ...old, ...patch } : old);
+      else setter((list) => append ? [...list, { ...point, ...patch }]
+        : list.map((old) => old.stop_id === point.stop_id ? { ...old, ...patch } : old));
+    } finally { controllers.current.delete(controller); }
+  };
+
+  useLayoutEffect(() => {
+    scrollPane.current?.scrollTo({ top: 0 });
+  }, [activeView]);
+
+  const navigate = (view, focus = false) => {
+    setActiveView(view);
+    if (focus) viewButtons.current[view]?.focus();
+  };
+  const navigateWithKeyboard = (event, view) => {
+    const views = auth.status === 'authenticated' ? ['plan', 'trips', 'locations'] : ['plan'];
+    const index = views.indexOf(view);
+    let next;
+    if (event.key === 'ArrowRight') next = views[(index + 1) % views.length];
+    else if (event.key === 'ArrowLeft') next = views[(index + views.length - 1) % views.length];
+    else if (event.key === 'Home') next = views[0];
+    else if (event.key === 'End') next = views[views.length - 1];
+    if (next) { event.preventDefault(); navigate(next, true); }
+  };
+
+  const savedChoices = (saved, onSavedSelect) => auth.status === 'authenticated'
+    ? { savedLocations: saved.locations, onSavedSelect } : {};
+  const unplaced = [...drivers.map((point, index) => [point, 'Driver ' + (index + 1)]),
+    ...passengers.map((point, index) => [point, 'Pickup ' + (index + 1)]), [destination, 'destination']]
+    .filter(([point]) => !hasCoordinates(point.coordinates)).map(([, name]) => name);
+  const missing = !drivers.length ? 'Add a driver.'
+    : !passengers.length ? 'Add a pickup.'
+      : unplaced.length > 3 ? `Missing places for ${unplaced.length} stops.`
+        : unplaced.length ? `Missing: ${listNames(unplaced)}.` : '';
+  // Calculate stays focusable while places are missing; pressing it leads to the first empty field.
+  const focusFirstMissing = () => {
+    const name = unplaced[0];
+    if (!name) return;
+    const label = name === 'destination' ? 'Destination' : name + ' location';
+    scrollPane.current?.querySelector(`input[aria-label="${label}"]`)?.focus();
+  };
+  // Hide private form/result during the account-transition render; layout reset precedes paint.
+  if (privateStale) return null;
+  return (
+    <AccountBoundary key={authKey} auth={auth}>
+      {(saved) => (
+        <div className="planner">
+          {auth.status === 'authenticated' && <SavedRowSync saved={saved} map={map} drivers={drivers} passengers={passengers}
+            destination={destination} setDrivers={setDrivers} setPassengers={setPassengers} setDestination={setDestination}
+            onMove={followSavedMove} />}
+          <div className="planner-nav" role="tablist" aria-label="Planner views">
+            {[['plan', 'Plan trip'], ['trips', 'My trips'], ['locations', 'My locations']].map(([view, label]) => (
+              <button key={view} type="button" role="tab" id={'planner-tab-' + view}
+                aria-controls={view === 'trips' && auth.status !== 'authenticated' ? undefined : 'planner-panel-' + view} aria-selected={activeView === view}
+                tabIndex={activeView === view ? 0 : -1}
+                disabled={view !== 'plan' && auth.status !== 'authenticated'}
+                ref={(button) => { viewButtons.current[view] = button; }}
+                onClick={() => navigate(view)} onKeyDown={(event) => navigateWithKeyboard(event, view)}>
+                {label}
+              </button>
+            ))}
+          </div>
+          <div className="planner-scroll" ref={scrollPane} tabIndex="0" aria-label="Planner content">
+          <div id="planner-panel-plan" role="tabpanel" aria-labelledby="planner-tab-plan" hidden={activeView !== 'plan'}>
+          {openedTrip && auth.status === 'authenticated' ? <div className="editing-trip">
+            <p>Editing <strong>{openedTrip.title}</strong></p>
+            <button type="button" className="text-button" onClick={startOver}>Start over</button>
+          </div> : null}
+          <SectionHeading title="Drivers" done={placed(drivers)} column="Seats" />
+          <p id="driver-seats-help" className="visually-hidden">Seats: room for passengers, not counting the driver.</p>
+          {drivers.map((point, index) => (
+            <div className="planner-location" key={point.stop_id}>
+              <SavedLocationControls showPicker={false} auth={auth} point={point} saved={saved}
+                fieldLabel={'Driver ' + (index + 1)} onSelect={(record) => selectPlace(record, point, setDrivers)}
+                onSaved={(row) => nameSaved(setDrivers, point.stop_id, row)}
+                renderAddress={(action) => <div className="driver-input-group">
+                  <AddressInput map={map} value={point.address} label={'Driver ' + (index + 1) + ' location'} nickname={point.label} placeName={point.place_name}
+                    placeholder={'Driver ' + (index + 1) + ' location'} action={action}
+                    {...savedChoices(saved, (record) => selectPlace(record, point, setDrivers))}
+                    onChange={(patch) => edit(setDrivers, point.stop_id, patch)} />
+                  <label className="planner-quantity-field">
+                    <input type="number" min="1" inputMode="numeric" value={point.capacity}
+                      aria-label={'Driver ' + (index + 1) + ' passenger seats'} aria-describedby="driver-seats-help"
+                      onChange={(event) => edit(setDrivers, point.stop_id, { capacity: Number(event.target.value) })} />
+                  </label>
+                  <button type="button" className="remove-location-button" aria-label={'Remove Driver ' + (index + 1)}
+                    title={'Remove Driver ' + (index + 1)} onClick={() => removePoint(setDrivers, point.stop_id, addDriverButton)}>
+                    <svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="m4 4 8 8M12 4l-8 8" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" /></svg>
+                  </button>
+                </div>} />
+            </div>
+          ))}
+          <button type="button" ref={addDriverButton} className="secondary-button" onClick={() => {
+            invalidate(); setDrivers((list) => [...list, newDriver()]);
+          }}>Add Driver</button>
+
+          <SectionHeading title="Passenger pickups" done={placed(passengers)} column="People" />
+          <p id="pickup-people-help" className="visually-hidden">People: how many wait at this pickup. They may ride in different cars.</p>
+          {passengers.map((point, index) => (
+            <div className="planner-location" key={point.stop_id}>
+              <SavedLocationControls showPicker={false} auth={auth} point={point} saved={saved}
+                fieldLabel={'Pickup ' + (index + 1)} onSelect={(record) => selectPlace(record, point, setPassengers)}
+                onSaved={(row) => nameSaved(setPassengers, point.stop_id, row)}
+                renderAddress={(action) => <div className="passenger-input-group">
+                  <AddressInput map={map} value={point.address} label={'Pickup ' + (index + 1) + ' location'} nickname={point.label} placeName={point.place_name}
+                    placeholder={'Pickup ' + (index + 1) + ' location'} action={action}
+                    {...savedChoices(saved, (record) => selectPlace(record, point, setPassengers))}
+                    onChange={(patch) => edit(setPassengers, point.stop_id, patch)} />
+                  <label className="planner-quantity-field">
+                    <input type="number" min="1" max="12" step="1" inputMode="numeric" value={point.count}
+                      aria-label={'Passengers at pickup ' + (index + 1)} aria-describedby="pickup-people-help"
+                      onChange={(event) => edit(setPassengers, point.stop_id,
+                        resizePickup(point, event.target.value === '' ? '' : Number(event.target.value)))} />
+                  </label>
+                  <button type="button" className="remove-location-button" aria-label={'Remove pickup ' + (index + 1)}
+                    title={'Remove pickup ' + (index + 1)} onClick={() => removePoint(setPassengers, point.stop_id, addPassengerButton)}>
+                    <svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="m4 4 8 8M12 4l-8 8" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" /></svg>
+                  </button>
+                </div>} />
+            </div>
+          ))}
+          <button type="button" ref={addPassengerButton} className="secondary-button" onClick={() => {
+            invalidate(); setPassengers((list) => [...list, newPassengerPickup()]);
+          }}>Add pickup</button>
+
+          <SectionHeading title="Destination" done={placed([destination])} />
+          <div className="planner-location">
+            <SavedLocationControls showPicker={false} auth={auth} point={destination} saved={saved} fieldLabel="Destination"
+              onSelect={(record) => selectPlace(record, destination, setDestination, true)}
+              onSaved={(row) => setDestination((point) => point.source?.place_id === row.source.place_id
+                ? { ...point, label: row.label, saved_id: row.id } : point)}
+              renderAddress={(action) => <AddressInput map={map} className="full-width-input" value={destination.address}
+                label="Destination" placeholder="Destination" onChange={editDestination}
+                {...savedChoices(saved, (record) => selectPlace(record, destination, setDestination, true))}
+                nickname={destination.label} placeName={destination.place_name} action={action} />} />
+          </div>
+          <button type="button" className={'submit-btn' + (missing ? ' is-unavailable' : '')} disabled={busy}
+            aria-disabled={missing ? 'true' : undefined} aria-describedby={missing ? 'calculate-missing' : undefined}
+            onClick={missing ? focusFirstMissing : submit}>
+            {busy ? 'Loading route…' : 'Calculate route'}
+          </button>
+          {/* One fixed row under Calculate: status on the left, Start over or Undo on the right, so nothing above it moves. */}
+          {(missing || cleared || dirty) && <div className="calculate-row">
+            {cleared ? <p className="saving-note" role="status">Planner cleared.</p>
+              : <p id="calculate-missing" className="saving-note">{missing}</p>}
+            {cleared ? <button type="button" className="text-button" onClick={undoStartOver}>Undo</button>
+              : dirty && !(openedTrip && auth.status === 'authenticated')
+                && <button type="button" className="text-button" onClick={startOver}>Start over</button>}
+          </div>}
+          {error && <p role="alert" className="saving-error">{error}</p>}
+
+          {result && (
+            <section className="route-summary">
+              <h3>Your route</h3>
+              <div className="label-row">
+                <label htmlFor="driver-view">Driver view</label>
+                {/* Directions load in the label row so the save controls below never jump. */}
+                <span role="status" className="saving-note">{mapBusy ? 'Loading directions…' : ''}</span>
+              </div>
+              <select id="driver-view" value={selectedDriver} onChange={(event) => setSelectedDriver(Number(event.target.value))}>
+                {result.inputs.drivers.map((driver, index) => (
+                  <option key={driver.stop_id} value={index}>{driver.label || 'Driver ' + (index + 1)}</option>
+                ))}
+              </select>
+              {result.saveError && <p className="saving-note">{result.saveError}</p>}
+              {mapError && <div className="saving-error" role="alert">
+                <p>{mapError}</p>
+                <button type="button" className="secondary-button" disabled={mapBusy}
+                  onClick={() => setMapAttempt((attempt) => attempt + 1)}>Retry map directions</button>
+              </div>}
+            </section>
+          )}
+          </div>
+          <SavedTripsPanel auth={auth} activeView={activeView} snapshot={result?.snapshot || null} routeAvailable={!!result}
+            openedTrip={openedTrip} onOpened={setOpenedTrip}
+            onBeginLoad={beginLoad} onEndLoad={endLoad} onLoad={loadTrip} />
+          <div id="planner-panel-locations" role="tabpanel" aria-labelledby="planner-tab-locations" hidden={activeView !== 'locations'}>
+            <SavedLocationsPanel auth={auth} saved={saved} map={map} activeView={activeView} />
+          </div>
+          </div>
+        </div>
+      )}
+    </AccountBoundary>
+  );
+}

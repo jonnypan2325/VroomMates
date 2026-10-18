@@ -1,0 +1,238 @@
+/* One bounded scroll region; navigation stays reachable in every view. */
+.planner { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; min-width: 0; overflow: clip; }
+.planner-nav { display: flex; flex: 0 0 auto; gap: 4px; margin: 0 18px; padding: 6px 0 12px; border-bottom: 1px solid var(--border); }
+.planner-nav button { flex: 1 1 0; min-width: 0; margin: 0; padding: 10px 5px; min-height: 44px; border-radius: 6px; background: transparent; color: var(--ink-soft); font-size: .82rem; font-weight: 600; white-space: normal; line-height: 1.3; box-shadow: none; }
+.planner-nav button[aria-selected='true'] { background: var(--accent-light); color: var(--accent-ink); }
+.planner-nav button:hover:not(:disabled) { background: var(--accent-wash-strong); color: var(--accent-ink); }
+.planner-nav button:focus-visible { outline: 3px solid var(--focus-ring); outline-offset: 2px; }
+.planner-count { display: inline-block; margin-left: 5px; font-size: .72rem; color: inherit; }
+.planner-scroll { flex: 1 1 auto; min-height: 0; min-width: 0; overflow-y: auto; overflow-x: hidden; scrollbar-gutter: stable; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; padding: 16px 22px 32px; scroll-padding-block: 16px; }
+.planner-scroll:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.planner [hidden] { display: none !important; }
+.planner h2 { margin: 0 0 16px; color: var(--ink); font-size: 1.2rem; font-weight: 600; letter-spacing: -.01em; }
+.planner h3 { margin: 20px 0 10px; }
+.planner h3:first-child { margin-top: 0; }
+.planner-location { margin-bottom: 12px; min-width: 0; }
+.planner-location > input { width: 100%; box-sizing: border-box; }
+.saving-card, .saving-section { margin: 0; padding: 0; min-width: 0; border: 0; border-radius: 0; background: transparent; box-shadow: none; }
+.route-summary { margin-top: 28px; }
+.saving-card[aria-label='Save route'] { margin-top: 16px; }
+.saving-card summary { cursor: pointer; color: var(--accent-text); font-weight: 650; padding: 4px 0; }
+.saving-card summary:focus-visible, .saving-card button:focus-visible, .saving-section button:focus-visible,
+.location-saving button:focus-visible, .saving-card select:focus-visible, .location-saving select:focus-visible { outline: 3px solid var(--focus-ring); outline-offset: 3px; }
+.saving-row, .saving-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+.saving-row input, .saving-row select { flex: 1 1 140px; min-width: 0; }
+.saving-row > label { flex-basis: 100%; margin-bottom: 0; }
+.saving-card label, .saving-section label, .route-summary label { display: block; font-size: .85rem; font-weight: 600; margin-bottom: 6px; }
+.saving-card input, .saving-card select, .saving-section input, .saving-section select, .route-summary select { width: 100%; box-sizing: border-box; }
+.saving-card button, .saving-section button, .location-saving button { margin: 0; width: auto; min-height: 40px; padding: 8px 12px; }
+.saving-note { color: var(--ink-soft); font-size: .83rem; line-height: 1.5; margin: 8px 0 0; }
+.saving-error { color: var(--danger-ink); background: var(--danger-wash); border: 1px solid var(--danger-border-soft); padding: 10px; border-radius: 6px; line-height: 1.5; font-size: .85rem; overflow-wrap: anywhere; }
+.saving-success { color: var(--success-ink); font-size: .85rem; line-height: 1.5; }
+.saving-list { list-style: none; margin: 18px 0 0; padding: 0; max-height: none; overflow: visible; }
+.saving-item { border-top: 1px solid var(--border); padding: 14px 0; overflow-wrap: anywhere; }
+.saving-item p { margin: 4px 0; }
+.saving-item .saving-row { justify-content: space-between; }
+.secondary-button { background: var(--accent-light); color: var(--accent-text); border: 1px solid var(--accent-border); box-shadow: none; }
+.secondary-button:hover { background: var(--accent-light-hover); color: var(--accent-ink); }
+.destructive-button { color: var(--danger-ink); background: var(--surface); border: 1px solid var(--danger-border-soft); box-shadow: none; }
+.destructive-button:hover { background: var(--danger-wash); color: var(--danger-ink); }
+button:disabled { opacity: .55; cursor: not-allowed; }
+.location-saving { margin-top: 6px; min-width: 0; }
+.location-saving .saving-row { margin-top: 6px; }
+.location-saving label { font-size: .78rem; color: var(--ink-soft); }
+.location-saving select { width: 100%; box-sizing: border-box; font-size: .82rem; padding: 8px 10px; }
+.location-saving .saving-actions { margin-top: 8px; }
+.location-saving .saving-note { font-size: .8rem; }
+.location-saving form { margin-top: 8px; padding: 14px; border: 1px solid var(--accent-border); border-radius: var(--radius); background: var(--accent-wash); }
+.location-saving form input { width: 100%; box-sizing: border-box; }
+@media (max-width: 768px) {
+  .planner-nav { margin-inline: 12px; }
+  .planner-scroll { padding: 14px 16px max(24px, env(safe-area-inset-bottom)); }
+}
+@media (max-width: 600px) {
+  .saving-row { align-items: stretch; }
+  .saving-actions button { flex: 1 1 auto; }
+}
+
+.address-field { flex: 1 1 auto; min-width: 0; width: 100%; }
+.address-input-wrap { position: relative; min-width: 0; }
+.address-input-wrap > input { display: block; margin: 0; width: 100%; height: 44px; box-sizing: border-box; }
+.address-input-wrap.has-saved-places > input { padding-right: 88px; }
+.address-saved-chooser { position: absolute; top: 1px; right: 1px; width: 80px; height: calc(100% - 2px); min-height: 0; border: 0; border-left: 1px solid var(--border); border-radius: 0 6px 6px 0; margin: 0; padding: 0 6px; background: var(--accent-wash); color: var(--accent-text); font-size: .78rem; }
+.location-manager-actions { margin-bottom: 16px; }
+.new-location-form { margin: 16px 0; padding: 16px 0; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
+.new-location-form label { display: block; margin: 12px 0 6px; font-size: .85rem; font-weight: 600; }
+.new-location-form > input { width: 100%; box-sizing: border-box; }
+.trip-item-main { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; }
+.trip-item-label { flex: 1 1 140px; min-width: 0; }
+.trip-item-actions { margin-left: auto; margin-top: 0; justify-content: flex-end; }
+.trip-item-actions > button { flex: 0 0 auto; }
+
+.driver-section-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin: 22px 0 12px; }
+.planner .driver-section-heading h3 { margin: 0; }
+.driver-saved-picker { min-width: 0; max-width: 100%; }
+.driver-saved-picker select { max-width: 100%; min-height: 40px; padding: 8px 10px; font-size: .8rem; color: var(--accent-text); background: var(--accent-wash); }
+.inline-location-saving { margin-top: 0; }
+.address-input-wrap.has-address-action { display: flex; height: 44px; box-sizing: border-box; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); }
+.address-input-wrap.has-address-action:focus-within { border-color: var(--accent); outline: 2px solid var(--accent-border); outline-offset: 1px; }
+.address-input-wrap.has-address-action > input { flex: 1 1 auto; min-width: 0; height: 42px; min-height: 0; border: 0; padding: 8px 10px; border-radius: var(--radius) 0 0 var(--radius); }
+.address-action { position: static; display: flex; flex: 0 0 auto; align-self: stretch; }
+.location-saving .address-action > button { margin: 0; min-height: 0; padding: 0 10px; font-size: .78rem; border: 0; border-left: 1px solid var(--border); border-radius: 0 5px 5px 0; height: 42px; width: auto; box-sizing: border-box; white-space: nowrap; }
+
+.planner .driver-input-group, .planner .passenger-input-group { align-items: center; margin: 0; gap: 8px; }
+.planner .driver-input-group > input[type='number'] { margin: 0; height: 44px; min-height: 44px; width: 52px; padding: 8px; }
+.planner .remove-location-button { flex: 0 0 44px; width: 44px; height: 44px; min-height: 44px; margin: 0; padding: 0; display: grid; place-items: center; border: 1px solid transparent; background: transparent; color: var(--ink-icon); font-size: 1.5rem; line-height: 1; }
+.planner .remove-location-button:hover { background: var(--danger-wash); color: var(--danger-ink); border-color: var(--danger-border-soft); }
+.planner .remove-location-button:focus-visible, .address-action > button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+@media (max-width: 600px) {
+  .driver-section-heading { gap: 8px; }
+  .driver-saved-picker { flex: 1 1 200px; }
+  .driver-saved-picker select { width: 100%; }
+  .location-saving .address-action > button { padding-inline: 8px; }
+}
+
+.planner .driver-input-group { align-items: flex-end; }
+.planner-quantity-field { flex: 0 0 64px; display: flex; flex-direction: column; gap: 6px; margin: 0; color: var(--ink-soft); }
+.planner-quantity-field > span { font-size: .75rem; line-height: 1.25; font-weight: 600; }
+.planner .planner-quantity-field > input { width: 100%; height: 44px; min-height: 44px; margin: 0; padding: 8px; }
+.quantity-help { margin: -4px 0 14px; }
+
+.planner .passenger-input-group { align-items: flex-end; }
+
+/* Named places: the nickname leads, the address follows in smaller text. */
+.address-named { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; justify-content: center; gap: 1px;
+  height: 42px; min-height: 0; margin: 0; padding: 0 10px; border: 0; border-radius: var(--radius) 0 0 var(--radius);
+  background: var(--surface); color: var(--ink); text-align: left; box-shadow: none; cursor: text; }
+.address-named:hover:not(:disabled) { background: var(--accent-wash); color: var(--ink); }
+.address-named:focus-visible { outline: none; }
+.address-named-label, .address-named-address { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.address-named-label { font-size: .92rem; font-weight: 600; line-height: 1.25; }
+.address-named-address { font-size: .72rem; font-weight: 400; line-height: 1.25; color: var(--ink-soft); }
+.address-input-wrap:not(.has-address-action) > .address-named { height: 44px; border: 1px solid var(--border); border-radius: var(--radius); }
+
+/* The save disclosure lives at the field's right edge. */
+.location-saving .address-action > .address-save-toggle { display: inline-flex; align-items: center; gap: 4px;
+  background: var(--accent-wash); color: var(--accent-text); font-weight: 600; box-shadow: none; }
+.location-saving .address-action > .address-save-toggle:hover:not(:disabled) { background: var(--accent-light); color: var(--accent-ink); }
+.location-saving .address-action > .address-save-toggle[aria-expanded='true'] { background: var(--accent-light); }
+.chevron { flex: 0 0 auto; transition: transform .18s cubic-bezier(.22, 1, .36, 1); }
+.chevron-open { transform: rotate(180deg); }
+@media (prefers-reduced-motion: reduce) { .chevron { transition: none; } }
+.address-saved-mark { display: grid; place-items: center; width: 40px; height: 42px; border-left: 1px solid var(--border);
+  color: var(--accent-dark); background: var(--accent-wash); border-radius: 0 5px 5px 0; }
+
+.visually-hidden { position: absolute !important; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden;
+  clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
+
+/* Disclosures: the chevron says the control opens and closes in place. */
+.disclosure-button { display: inline-flex; align-items: center; gap: 6px; }
+.text-button { display: inline-flex; align-items: center; gap: 4px; min-height: 36px; padding: 6px 10px; margin: 0;
+  border: 1px solid transparent; border-radius: 6px; background: transparent; color: var(--accent-text); font-size: .85rem; font-weight: 600; box-shadow: none; }
+.text-button:hover:not(:disabled), .text-button[aria-expanded='true'] { background: var(--accent-light); color: var(--accent-ink); }
+.icon-button { display: grid; place-items: center; width: 36px; height: 36px; min-height: 36px; margin: 0; padding: 0;
+  border: 1px solid transparent; border-radius: 6px; background: transparent; color: var(--ink-icon); box-shadow: none; }
+.delete-icon-button:hover:not(:disabled) { background: var(--danger-wash); color: var(--danger-ink); border-color: var(--danger-border-soft); }
+.location-saving .text-button, .location-saving .icon-button, .saving-card .text-button, .saving-card .icon-button { min-height: 36px; }
+.location-saving .text-button { padding: 6px 10px; }
+.location-saving .icon-button, .saving-card .icon-button { width: 36px; padding: 0; }
+
+/* Saved location rows: nickname, then the current address in smaller text. */
+.location-item-main { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.location-item-text { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; align-items: flex-start; gap: 3px; padding-top: 6px; }
+.location-item-text > .inline-edit-input, .location-item-text > .is-editing { align-self: stretch; }
+.location-item-text strong { font-size: .95rem; font-weight: 600; color: var(--ink); }
+.location-item-address { font-size: .8rem; line-height: 1.4; color: var(--ink-soft); }
+.location-item-address.is-missing { color: var(--warning-ink); }
+.location-item-actions { display: flex; align-items: center; gap: 2px; flex: 0 0 auto; }
+.location-delete-confirm { margin-top: 8px; }
+.location-edit-form { margin-top: 12px; padding: 14px; border: 1px solid var(--accent-border); border-radius: var(--radius); background: var(--accent-wash); }
+.location-edit-form label { display: block; margin: 0 0 6px; font-size: .78rem; font-weight: 600; color: var(--ink-soft); }
+.location-edit-form label:not(:first-child) { margin-top: 12px; }
+.location-edit-form > input { width: 100%; box-sizing: border-box; }
+
+.list-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.planner .list-heading h2 { margin: 0; }
+.trip-save { margin-top: 20px; }
+.trip-save-form { margin-top: 10px; padding: 14px; border: 1px solid var(--accent-border); border-radius: var(--radius); background: var(--accent-wash); }
+.trip-save-form .saving-actions { margin-top: 10px; }
+
+/* In-place editing: text looks like text until edited; a dotted underline marks the live field. */
+.inline-edit { display: block; max-width: 100%; min-height: 0; margin: 0; padding: 1px 0; border: 0; border-radius: 0;
+  background: transparent; color: inherit; font: inherit; text-align: left; box-shadow: none; cursor: text;
+  text-decoration: underline dotted transparent; text-underline-offset: 4px; text-decoration-thickness: 1px;
+  transition: text-decoration-color .15s ease-out; overflow-wrap: anywhere; }
+.location-saving .inline-edit, .saving-card .inline-edit { min-height: 0; padding: 1px 0; width: auto; }
+.inline-edit:hover:not(:disabled), .inline-edit:focus-visible { background: transparent; color: inherit;
+  text-decoration-color: var(--accent-underline); }
+.inline-edit:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 2px; }
+.inline-edit.is-busy { opacity: .6; }
+.inline-edit-input { display: block; width: 100%; box-sizing: border-box; height: auto; min-height: 0; margin: 0; padding: 1px 0;
+  border: 0; border-bottom: 1px dotted var(--accent-dark); border-radius: 0; background: transparent; color: var(--ink);
+  font: inherit; line-height: inherit; box-shadow: none; outline: none; }
+.inline-edit-input:focus { border-bottom-color: var(--accent-dark); box-shadow: none; outline: none; }
+.inline-edit-title, input.inline-edit-title { font-size: .95rem; font-weight: 600; color: var(--ink); }
+.inline-edit-detail, input.inline-edit-detail { font-size: .8rem; line-height: 1.4; color: var(--ink-soft); }
+.inline-edit-detail.is-missing { color: var(--warning-ink); }
+.inline-address-editor { display: block; }
+.inline-address-editor .address-input-wrap > input { height: auto; min-height: 0; padding: 1px 0; border: 0;
+  border-bottom: 1px dotted var(--accent-dark); border-radius: 0; background: transparent; font-size: .8rem; line-height: 1.4;
+  box-shadow: none; outline: none; }
+.row-error { margin-top: 8px; }
+.editing-trip { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 0 0 4px;
+  padding: 4px 4px 4px 12px; border-radius: var(--radius); background: var(--accent-wash-strong); color: var(--accent-ink); font-size: .82rem; }
+.editing-trip p { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+.editing-trip strong { font-weight: 600; }
+
+.planner .driver-section-heading { margin: 20px 0 10px; }
+.planner .driver-section-heading h3 { display: flex; align-items: center; gap: 6px; flex: 1 1 auto; margin: 0; }
+.section-done { color: var(--success); }
+.saved-suggestions { position: fixed; z-index: 2100; margin: 0; padding: 4px 0; list-style: none; background: var(--surface);
+  border: 1px solid var(--border); border-radius: 8px; box-shadow: var(--shadow-raised);
+  max-height: 280px; overflow-y: auto; font-size: .88rem; }
+.saved-suggestions-heading { padding: 6px 12px 4px; color: var(--ink-soft); font-size: .72rem; font-weight: 600; }
+.saved-suggestions [role='option'] { display: flex; align-items: center; gap: 8px; padding: 8px 12px; color: var(--ink); cursor: pointer; }
+.saved-suggestions [role='option'] svg { flex: 0 0 auto; color: var(--accent-dark); }
+.saved-suggestions [role='option'] span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.saved-suggestions [role='option'].is-active { background: var(--accent-wash-strong); }
+body.saved-suggestions-open .pac-container { display: none !important; }
+.section-column { margin-left: auto; width: 64px; margin-right: 52px; color: var(--ink-soft); font-weight: 600; }
+
+/* Touch screens: full-size targets, and long names wrap instead of hiding behind a hover tooltip. */
+@media (pointer: coarse) {
+  .icon-button, .location-saving .icon-button, .saving-card .icon-button {
+    width: var(--tap-target); height: var(--tap-target); min-height: var(--tap-target); }
+  .text-button, .location-saving .text-button { min-height: var(--tap-target); }
+  .inline-edit, .location-saving .inline-edit, .saving-card .inline-edit { display: flex; align-items: center; min-height: var(--tap-target); }
+  .location-item-text { gap: 0; padding-top: 0; }
+  .location-item-main { align-items: center; }
+  /* Keep each tap area at full height but let the name and its address sit together. */
+  .location-item-text > .inline-edit-title { align-items: flex-end; padding-bottom: 2px; }
+  .location-item-text > .inline-edit-detail { align-items: flex-start; padding-top: 2px; }
+}
+.submit-btn.is-unavailable { opacity: .55; cursor: not-allowed; }
+.submit-btn.is-unavailable:hover { background: var(--accent); }
+.calculate-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 44px; margin-top: 4px; }
+.calculate-row .saving-note { flex: 1 1 auto; margin: 0; min-width: 0; }
+.calculate-row .text-button { margin-left: auto; flex: 0 0 auto; }
+/* Small text actions keep their own width where the mobile layout widens buttons. */
+.text-button { width: auto; }
+/* Loading a saved place happens inside the field, so the row keeps its height. */
+.address-loading { position: absolute; inset: 1px; z-index: 1; display: flex; align-items: center; padding: 0 10px;
+  border-radius: var(--radius); background: var(--accent-wash); color: var(--ink-soft); font-size: .85rem; pointer-events: none; }
+
+/* Controls that swap state keep their size. */
+.label-row { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.label-row .saving-note { margin: 0; line-height: 1.2; }
+.location-saving .address-action > .address-save-toggle, .address-saved-mark { min-width: 72px; justify-content: center; }
+.inline-edit { border-bottom: 1px solid transparent; }
+
+/* Full name and address for a named row, over the page so nothing below moves. */
+.address-details { position: fixed; z-index: 2100; box-sizing: border-box; min-width: 220px; padding: 12px 14px;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 8px; box-shadow: var(--shadow-raised);
+  overflow-wrap: anywhere; }
+.address-details p { margin: 0; }
+.address-details-title { color: var(--ink); font-size: .95rem; font-weight: 600; line-height: 1.3; }
+.address-details-address { margin-top: 4px !important; color: var(--ink-soft); font-size: .82rem; line-height: 1.4; }
+.address-details .text-button { margin: 8px 0 0 -10px; }
+.address-named { cursor: pointer; }
