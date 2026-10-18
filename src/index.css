@@ -5,14 +5,20 @@ body,
   margin: 0;
 }
 
+/* Only the planner panel scrolls; the page itself never scrolls or bounces, so a drag
+   that reaches the panel's top cannot pull the whole page down. */
+html,
+body {
+  overflow: hidden;
+  overscroll-behavior: none;
+}
+
 body {
   font-family: 'Poppins', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen',
     'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue',
     sans-serif;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
-  /* the app manages its own scrolling regions */
-  overscroll-behavior: none;
   background: var(--bg); /* matches the app shell, so no gap can show white */
   -webkit-text-size-adjust: 100%;
 }
