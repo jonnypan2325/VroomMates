@@ -6,7 +6,7 @@ import subprocess
 import sys
 import unittest
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 from google.auth.credentials import AnonymousCredentials
 from google.api_core.exceptions import ServiceUnavailable
@@ -187,6 +187,18 @@ class FirestoreStoreTests(unittest.TestCase):
             self.store.update_location(self.other, work['id'], {'label': 'Theirs'})
         with self.assertRaises(SavedNotFound):
             self.store.update_location(self.owner, str(uuid.uuid4()), {'label': 'Nobody'})
+
+    def test_location_edit_time_never_moves_backwards(self):
+        home = location(label='Home')
+        self.store.create_location(self.owner, home)
+        later = NOW + timedelta(hours=1)
+        self.store.clock = lambda: later
+        self.store.update_location(self.owner, home['id'], {'label': 'Home base'})
+        self.store.clock = lambda: NOW + timedelta(minutes=10)
+        edited = self.store.update_location(self.owner, home['id'], {'label': 'Home again'})
+        self.assertEqual(edited['updated_at'], self.store.get_location(self.owner, home['id'])['updated_at'])
+        self.assertEqual(self.store.get_location(self.owner, home['id'])['updated_at'],
+                         later.isoformat(timespec='microseconds').replace('+00:00', 'Z'))
 
     def test_trip_update_keeps_creation_and_recounts(self):
         payload = trip()

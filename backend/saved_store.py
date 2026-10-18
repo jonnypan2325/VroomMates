@@ -256,8 +256,9 @@ class FirestoreSavedStore:
                 if new_key in labels: raise SaveConflict('label', labels[new_key])
                 del labels[old_key]
                 labels[new_key] = ident
-            # Never record an edit as earlier than the creation, even if clocks disagree.
-            stamp = max(now, found.to_dict()['created_at'])
+            # Never record an edit as earlier than the creation or the last edit, even if clocks disagree.
+            stored = found.to_dict()
+            stamp = max(now, stored['created_at'], stored['updated_at'])
             tx.update(ref, dict(changes, updated_at=stamp))
             if labels is not None:
                 tx.set(account, {'schema_version': 1, 'location_labels': labels, 'location_count': count},
