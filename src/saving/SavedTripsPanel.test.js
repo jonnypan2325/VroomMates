@@ -388,3 +388,73 @@ test('a rename interrupted by an owner change shows no failure to the next owner
   await act(async () => { await Promise.resolve(); });
   expect(screen.queryByRole('alert')).not.toBeInTheDocument();
 });
+
+// An opened trip: the list holds it, the detail loads it, and PATCH, POST and DELETE answer like the API.
+const twoPickups = () => {
+  const saved = snapshot();
+  saved.inputs.passengers.push(point('pickup2'));
+  saved.routes[0].stop_ids = ['driver', 'pickup', 'pickup2', 'end'];
+  return saved;
+};
+async function openedTripPanel() {
+  const transport = jest.fn(async (path, options) => {
+    if (path === '/saved-trips?limit=20') return response({ trips: [summary()], next_cursor: null });
+    const body = options.body && JSON.parse(options.body);
+    if (options.method === 'PATCH') return response(detail(ID, body.title || 'Team trip', body.snapshot || snapshot()));
+    if (options.method === 'POST') return response(detail(body.id, body.title, body.snapshot), 201);
+    if (options.method === 'DELETE') return response(null, 204);
+    return response(detail());
+  });
+  const auth = authFor(transport), onOpened = jest.fn(), load = jest.fn();
+  const view = await renderPanel(auth, { onLoad: load, onOpened });
+  await click('Open Team trip');
+  const rerender = (props) => view.rerender(<SavedTripsPanel auth={auth} routeAvailable onLoad={load} onOpened={onOpened}
+    openedTrip={{ id: ID, title: 'Team trip' }} snapshot={snapshot()} {...props} />);
+  rerender();
+  const calls = (method) => transport.mock.calls.filter(([, options]) => options.method === method);
+  return { rerender, onOpened, calls };
+}
+
+test('Enter in the route name updates an opened trip instead of saving a copy', async () => {
+  const { rerender, calls } = await openedTripPanel();
+  rerender({ snapshot: twoPickups() });
+  openSave();
+  await settle(() => fireEvent.keyDown(screen.getByRole('textbox', { name: 'Route name' }), { key: 'Enter' }));
+  expect(calls('PATCH')).toHaveLength(1);
+  expect(calls('POST')).toHaveLength(0);
+  expect(screen.getByText('Updated “Team trip”.')).toBeVisible();
+});
+
+test('renaming the opened trip carries the new name into a later update', async () => {
+  const { rerender, onOpened, calls } = await openedTripPanel();
+  fireEvent.doubleClick(screen.getByRole('button', { name: /^Name of trip Team trip/ }));
+  const editor = screen.getByRole('textbox', { name: 'Name of trip Team trip' });
+  fireEvent.change(editor, { target: { value: 'Evening trip' } });
+  await settle(() => fireEvent.keyDown(editor, { key: 'Enter' }));
+  expect(onOpened).toHaveBeenLastCalledWith({ id: ID, title: 'Evening trip' });
+  rerender({ openedTrip: { id: ID, title: 'Evening trip' } });
+  openSave();
+  expect(screen.getByRole('textbox', { name: 'Route name' })).toHaveValue('Evening trip');
+  expect(screen.getByRole('button', { name: 'No changes to save' })).toBeDisabled();
+  rerender({ openedTrip: { id: ID, title: 'Evening trip' }, snapshot: twoPickups() });
+  await click('Update “Evening trip”');
+  expect(JSON.parse(calls('PATCH')[1][1].body).title).toBe('Evening trip');
+});
+
+test('updating an opened trip refreshes its counts in My trips', async () => {
+  const { rerender } = await openedTripPanel();
+  expect(screen.getByText(/^1 driver · 1 passenger · /)).toBeVisible();
+  rerender({ snapshot: twoPickups() });
+  openSave();
+  await click('Update “Team trip”');
+  expect(screen.getByText(/^1 driver · 2 passengers · /)).toBeVisible();
+});
+
+test('deleting the opened trip stops the planner editing it', async () => {
+  const { rerender, onOpened } = await openedTripPanel();
+  await click('Delete Team trip'); await click('Confirm delete Team trip');
+  expect(onOpened).toHaveBeenLastCalledWith(null);
+  rerender({ openedTrip: null });
+  openSave();
+  expect(screen.getByRole('button', { name: 'Save route' })).toBeEnabled();
+});

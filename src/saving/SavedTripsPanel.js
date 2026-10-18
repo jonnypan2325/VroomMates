@@ -329,7 +329,10 @@ export default function SavedTripsPanel({ auth, snapshot, onLoad, onBeginLoad, o
       if ((body.title && trip.title !== body.title) || (body.snapshot && !sameData(trip.snapshot, body.snapshot))) {
         throw new SavedApiError(503, 'INVALID_RESPONSE', 'The change could not be confirmed.');
       }
-      setList((old) => ({ ...old, trips: old.trips.map((row) => row.id === id ? { ...row, title: trip.title } : row) }));
+      // The list summary counts the stored stops, so it follows the confirmed snapshot too.
+      const summary = { title: trip.title, driver_count: trip.snapshot.inputs.drivers.length,
+        passenger_count: trip.snapshot.inputs.passengers.length };
+      setList((old) => ({ ...old, trips: old.trips.map((row) => row.id === id ? { ...row, ...summary } : row) }));
       if (openedTrip?.id === id) onOpened?.({ id, title: trip.title });
       return trip;
     } finally { finishRequest(request); }
@@ -363,7 +366,15 @@ export default function SavedTripsPanel({ auth, snapshot, onLoad, onBeginLoad, o
     const owner = scope;
     try {
       const updated = await patchTrip(trip.id, { title: name });
-      if (updated) setActionSuccess(`Renamed to “${updated.title}”.`);
+      if (!updated) return;
+      setActionSuccess(`Renamed to “${updated.title}”.`);
+      if (openedTrip?.id === trip.id) {
+        // Carry the new name into the save form, so a later Update cannot write the old name back.
+        // A name the user is still editing there is kept.
+        const previous = confirmed?.scope === scope ? confirmed.content.title : null;
+        setTitle((current) => (current === previous ? updated.title : current));
+        setConfirmed((old) => (old?.scope === scope ? { ...old, content: { ...old.content, title: updated.title } } : old));
+      }
     } catch (error) {
       if (error?.name === 'AbortError' || currentScope.current !== owner) throw error;
       setActionError(failureMessage(error, 'The new name could not be saved. Please retry.'));
@@ -383,6 +394,11 @@ export default function SavedTripsPanel({ auth, snapshot, onLoad, onBeginLoad, o
       if (response !== null) throw new Error('Invalid delete response.');
       setList((old) => ({ ...old, trips: old.trips.filter((trip) => trip.id !== id), loading: false }));
       setDeleteId(null); setActionSuccess('Trip deleted.');
+      if (openedTrip?.id === id) {
+        // The planner must stop editing a trip that no longer exists.
+        setConfirmed(null);
+        onOpened?.(null);
+      }
       returnFocus.current = true;
     } catch (error) {
       if (isCurrent(request)) {
@@ -417,7 +433,12 @@ export default function SavedTripsPanel({ auth, snapshot, onLoad, onBeginLoad, o
         <input id={titleId} type="text" value={title} disabled={!!activeIntent || saveBusy}
           placeholder="e.g. Friday dinner" onChange={(event) => {
             setTitle(event.target.value); setSaveError(''); setSaveSuccess('');
-          }} onKeyDown={(event) => { if (event.key === 'Enter' && snapshot && title.trim() && !alreadySaved) void saveTrip(); }} />
+          }} onKeyDown={(event) => {
+            if (event.key !== 'Enter' || !snapshot || !title.trim() || alreadySaved || saveBusy) return;
+            // Enter matches the primary button: update an opened trip, otherwise save a new one.
+            event.preventDefault();
+            void (openedTrip ? updateTrip() : saveTrip());
+          }} />
         <div className="saving-actions">
           {activeIntent ? (
             <button type="button" disabled={saveBusy} onClick={() => void saveTrip(true)}>
