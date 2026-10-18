@@ -1,5 +1,5 @@
 import { TextEncoder } from 'util';
-import { hasCoordinates, hasPlaceSource, resolvePlace } from './places';
+import { hasCoordinates, hasPlaceSource, landmarkName, resolvePlace } from './places';
 beforeAll(() => { global.TextEncoder = TextEncoder; });
 let callback, getDetails;
 beforeEach(() => {
@@ -11,8 +11,9 @@ afterEach(() => { delete window.google; jest.useRealTimers(); });
 const details = () => ({ formatted_address: 'Fresh synthetic address', geometry: { location: { lat: () => 40, lng: () => -70 } } });
 it('refreshes only requested place fields without rewriting the reference', async () => {
   const pending = resolvePlace({}, 'stored-id'); callback(details(), 'OK');
-  await expect(pending).resolves.toEqual({ address: 'Fresh synthetic address', coordinates: { lat: 40, lng: -70 }, source: { kind: 'google_places', place_id: 'stored-id' } });
-  expect(getDetails.mock.calls[0][0]).toEqual({ placeId: 'stored-id', fields: ['place_id', 'formatted_address', 'geometry.location'] });
+  await expect(pending).resolves.toEqual({ address: 'Fresh synthetic address', coordinates: { lat: 40, lng: -70 }, place_name: '',
+    source: { kind: 'google_places', place_id: 'stored-id' } });
+  expect(getDetails.mock.calls[0][0]).toEqual({ placeId: 'stored-id', fields: ['place_id', 'name', 'formatted_address', 'geometry.location'] });
   expect(jest.getTimerCount()).toBe(0);
 });
 it('aborts stale lookup and ignores its later callback', async () => {
@@ -47,4 +48,12 @@ it('checks finite geographic bounds and reference identity', () => {
   [null, { lat: NaN, lng: 0 }, { lat: 0, lng: 181 }, { lat: '0', lng: 0 }].forEach(value => expect(hasCoordinates(value)).toBe(false));
   expect(hasPlaceSource({ kind: 'google_places', place_id: 'opaque-id' })).toBe(true);
   ['', 'bad id', 'id\u200b', 'x'.repeat(4097)].forEach(place_id => expect(hasPlaceSource({ kind: 'google_places', place_id })).toBe(false));
+});
+
+it('keeps a landmark name only when it says more than the start of the street address', () => {
+  expect(landmarkName('Irvine Spectrum Center', '670 Spectrum Center Dr, Irvine, CA')).toBe('Irvine Spectrum Center');
+  expect(landmarkName('670 Spectrum Center Dr', '670 Spectrum Center Dr, Irvine, CA')).toBe('');
+  expect(landmarkName('  Market  ', '1 Way')).toBe('Market');
+  expect(landmarkName('', '1 Way')).toBe('');
+  expect(landmarkName(undefined, '1 Way')).toBe('');
 });

@@ -209,10 +209,6 @@ body.saved-suggestions-open .pac-container { display: none !important; }
   /* Keep each tap area at full height but let the name and its address sit together. */
   .location-item-text > .inline-edit-title { align-items: flex-end; padding-bottom: 2px; }
   .location-item-text > .inline-edit-detail { align-items: flex-start; padding-top: 2px; }
-  .address-input-wrap.has-address-action { height: auto; min-height: var(--tap-target); }
-  .address-named { height: auto; min-height: 42px; padding-block: 6px; }
-  .address-named-label, .address-named-address { white-space: normal; overflow-wrap: anywhere; }
-  .address-saved-mark, .location-saving .address-action > button { height: auto; min-height: 42px; }
 }
 .submit-btn.is-unavailable { opacity: .55; cursor: not-allowed; }
 .submit-btn.is-unavailable:hover { background: var(--accent); }
@@ -228,3 +224,13 @@ body.saved-suggestions-open .pac-container { display: none !important; }
 .label-row .saving-note { margin: 0; line-height: 1.2; }
 .location-saving .address-action > .address-save-toggle, .address-saved-mark { min-width: 72px; justify-content: center; }
 .inline-edit { border-bottom: 1px solid transparent; }
+
+/* Full name and address for a named row, over the page so nothing below moves. */
+.address-details { position: fixed; z-index: 2100; box-sizing: border-box; min-width: 220px; padding: 12px 14px;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 8px; box-shadow: var(--shadow-raised);
+  overflow-wrap: anywhere; }
+.address-details p { margin: 0; }
+.address-details-title { color: var(--ink); font-size: .95rem; font-weight: 600; line-height: 1.3; }
+.address-details-address { margin-top: 4px !important; color: var(--ink-soft); font-size: .82rem; line-height: 1.4; }
+.address-details .text-button { margin: 8px 0 0 -10px; }
+.address-named { cursor: pointer; }

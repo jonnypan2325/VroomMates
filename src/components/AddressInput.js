@@ -1,12 +1,13 @@
 import React, { useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { hasCoordinates, hasPlaceSource } from '../saving/places';
+import { hasCoordinates, hasPlaceSource, landmarkName } from '../saving/places';
 
-const invalidPoint = () => ({ coordinates: { lat: null, lng: null }, source: null, label: '' });
+// Typing replaces the place, so its saved-location link and landmark name go with it.
+const invalidPoint = () => ({ coordinates: { lat: null, lng: null }, source: null, label: '', place_name: '', saved_id: null });
 
 /** Google search and an account's saved-place chooser share one address field. */
 export default function AddressInput({ value, placeholder, label, map, onChange, className,
-  disabled = false, savedLocations = [], onSavedSelect, action, nickname = '', onBlur, autoFocus = false }) {
+  disabled = false, savedLocations = [], onSavedSelect, action, nickname = '', placeName = '', onBlur, autoFocus = false }) {
   const inputRef = useRef(null);
   const onChangeRef = useRef(onChange);
   onChangeRef.current = onChange;
@@ -20,10 +21,35 @@ export default function AddressInput({ value, placeholder, label, map, onChange,
   const [box, setBox] = useState(null);
   // A named place shows its nickname over the address until the user chooses to edit it.
   const [editing, setEditing] = useState(false);
-  const named = Boolean(nickname && value && !editing);
+  const [details, setDetails] = useState(null);
+  const namedButton = useRef(null);
+  const detailsId = useId();
+  // A nickname wins; otherwise a landmark's own name leads, with the street address below.
+  const title = nickname || placeName;
+  const named = Boolean(title && value && !editing);
   useEffect(() => {
     if (editing) { inputRef.current?.focus(); inputRef.current?.select(); }
   }, [editing]);
+  useEffect(() => {
+    if (!details) return undefined;
+    const close = () => setDetails(null);
+    const outside = (event) => {
+      if (!event.target.closest?.('.address-details') && !namedButton.current?.contains(event.target)) close();
+    };
+    document.addEventListener('pointerdown', outside, true);
+    window.addEventListener('resize', close);
+    window.addEventListener('scroll', close, true);
+    return () => {
+      document.removeEventListener('pointerdown', outside, true);
+      window.removeEventListener('resize', close);
+      window.removeEventListener('scroll', close, true);
+    };
+  }, [details]);
+  useEffect(() => { if (!named) setDetails(null); }, [named]);
+  const openDetails = () => {
+    const rect = namedButton.current?.getBoundingClientRect();
+    if (rect) setDetails({ left: rect.left, top: rect.bottom + 4, width: rect.width });
+  };
   useEffect(() => {
     live.current = true;
     return () => { live.current = false; selection.current += 1; };
@@ -33,7 +59,7 @@ export default function AddressInput({ value, placeholder, label, map, onChange,
     if (!map || !input || !window.google?.maps?.places?.Autocomplete) return undefined;
     let active = true;
     const autocomplete = new window.google.maps.places.Autocomplete(input, {
-      fields: ['place_id', 'formatted_address', 'geometry.location'],
+      fields: ['place_id', 'name', 'formatted_address', 'geometry.location'],
     });
     autocomplete.bindTo('bounds', map);
     const listener = autocomplete.addListener('place_changed', () => {
@@ -48,7 +74,8 @@ export default function AddressInput({ value, placeholder, label, map, onChange,
         onChangeRef.current(invalidPoint());
         return;
       }
-      onChangeRef.current({ address: place.formatted_address, coordinates, source, label: '' });
+      onChangeRef.current({ address: place.formatted_address, coordinates, source, label: '', saved_id: null,
+        place_name: landmarkName(place.name, place.formatted_address) });
     });
     return () => {
       active = false;
@@ -106,9 +133,10 @@ export default function AddressInput({ value, placeholder, label, map, onChange,
   };
   return <div className="address-field" aria-busy={choosing}>
     <div className={'address-input-wrap' + (action ? ' has-address-action' : '')}>
-      {named && <button type="button" className="address-named" disabled={disabled} title={nickname + '\n' + value}
-        aria-label={label + ': ' + nickname + ', ' + value + '. Change address'} onClick={() => setEditing(true)}>
-        <span className="address-named-label">{nickname}</span>
+      {named && <button type="button" ref={namedButton} className="address-named" disabled={disabled}
+        aria-label={label + ': ' + title + ', ' + value} aria-expanded={Boolean(details)}
+        aria-controls={details ? detailsId : undefined} onClick={() => (details ? setDetails(null) : openDetails())}>
+        <span className="address-named-label">{title}</span>
         <span className="address-named-address">{value}</span>
       </button>}
       <input ref={inputRef} type="text" className={className} value={value} disabled={disabled} hidden={named}
@@ -125,6 +153,14 @@ export default function AddressInput({ value, placeholder, label, map, onChange,
       {choosing && <span className="address-loading" role="status">Loading saved place…</span>}
       {action && <div className="address-action">{action}</div>}
     </div>
+    {details && createPortal(<div id={detailsId} className="address-details" role="dialog" aria-label={'Details for ' + label}
+      style={{ left: details.left, top: details.top, width: details.width }}
+      onKeyDown={(event) => { if (event.key === 'Escape') { setDetails(null); namedButton.current?.focus(); } }}>
+      <p className="address-details-title">{title}</p>
+      <p className="address-details-address">{value}</p>
+      <button type="button" className="text-button" autoFocus
+        onClick={() => { setDetails(null); setEditing(true); }}>Change address</button>
+    </div>, document.body)}
     {listOpen && box && createPortal(<ul id={listId} role="listbox" aria-label={'Saved places for ' + label}
       className="saved-suggestions" style={{ left: box.left, top: box.top, width: box.width }}>
       <li className="saved-suggestions-heading" role="presentation">Saved places</li>

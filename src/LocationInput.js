@@ -24,6 +24,48 @@ function listNames(names) {
   return names.join(', ');
 }
 
+/** Planner rows picked from My locations follow later renames, moves and deletions there. */
+function SavedRowSync({ saved, map, drivers, passengers, destination, setDrivers, setPassengers, setDestination, onMove }) {
+  useEffect(() => {
+    // A loading or failed list says nothing about deletions, so rows stay as they are.
+    if (saved.loading || saved.error) return undefined;
+    const byId = new Map(saved.locations.map((row) => [row.id, row]));
+    const relabel = (point) => {
+      if (!point.saved_id) return point;
+      const row = byId.get(point.saved_id);
+      if (!row) return { ...point, label: '', saved_id: null };
+      if (row.source.place_id !== point.source?.place_id || row.label === point.label) return point;
+      return { ...point, label: row.label };
+    };
+    const relabelList = (list) => {
+      const next = list.map(relabel);
+      return next.some((point, index) => point !== list[index]) ? next : list;
+    };
+    setDrivers(relabelList);
+    setPassengers(relabelList);
+    setDestination(relabel);
+    const moved = new Set([...drivers, ...passengers, destination].filter((point) => point.saved_id
+      && byId.get(point.saved_id) && byId.get(point.saved_id).source.place_id !== point.source?.place_id)
+      .map((point) => point.saved_id));
+    const controller = new AbortController();
+    moved.forEach(async (savedId) => {
+      const row = byId.get(savedId);
+      try {
+        const details = await resolvePlace(map, row.source.place_id, { signal: controller.signal });
+        if (controller.signal.aborted) return;
+        const follow = (point) => point.saved_id === savedId ? { ...point, ...details, label: row.label } : point;
+        onMove();
+        setDrivers((list) => list.map(follow));
+        setPassengers((list) => list.map(follow));
+        setDestination(follow);
+      } catch (_) { /* A failed or superseded lookup leaves the row at its last place. */ }
+    });
+    return () => controller.abort();
+  }, [saved.locations, saved.loading, saved.error, map, drivers, passengers, destination,
+    setDrivers, setPassengers, setDestination, onMove]);
+  return null;
+}
+
 function AccountBoundary({ auth, children }) {
   const saved = useSavedLocations(auth);
   return children(saved);
@@ -159,7 +201,7 @@ export default function LocationInput({ map, directionsRenderer, auth }) {
   };
   // A confirmed save names the row only if it still holds the place that was saved.
   const nameSaved = (setter, id, row) => setter((list) => list.map((point) => point.stop_id === id
-    && point.source?.place_id === row.source.place_id ? { ...point, label: row.label } : point));
+    && point.source?.place_id === row.source.place_id ? { ...point, label: row.label, saved_id: row.id } : point));
   const removePoint = (setter, id, addButton) => {
     invalidate(); setError('');
     setter((list) => list.filter((point) => point.stop_id !== id));
@@ -296,7 +338,7 @@ export default function LocationInput({ map, directionsRenderer, auth }) {
       const details = await resolvePlace(map, record.source.place_id, { signal: controller.signal });
       if (!current(captured)) throw abortError();
       privateOwner.current = captured.owner;
-      const patch = { ...details, label: record.label };
+      const patch = { ...details, label: record.label, saved_id: record.id };
       if (isDestination) setter((old) => old.stop_id === point.stop_id ? { ...old, ...patch } : old);
       else setter((list) => append ? [...list, { ...point, ...patch }]
         : list.map((old) => old.stop_id === point.stop_id ? { ...old, ...patch } : old));
@@ -344,6 +386,9 @@ export default function LocationInput({ map, directionsRenderer, auth }) {
     <AccountBoundary key={authKey} auth={auth}>
       {(saved) => (
         <div className="planner">
+          {auth.status === 'authenticated' && <SavedRowSync saved={saved} map={map} drivers={drivers} passengers={passengers}
+            destination={destination} setDrivers={setDrivers} setPassengers={setPassengers} setDestination={setDestination}
+            onMove={invalidate} />}
           <div className="planner-nav" role="tablist" aria-label="Planner views">
             {[['plan', 'Plan trip'], ['trips', 'My trips'], ['locations', 'My locations']].map(([view, label]) => (
               <button key={view} type="button" role="tab" id={'planner-tab-' + view}
@@ -370,7 +415,7 @@ export default function LocationInput({ map, directionsRenderer, auth }) {
                 fieldLabel={'Driver ' + (index + 1)} onSelect={(record) => selectPlace(record, point, setDrivers)}
                 onSaved={(row) => nameSaved(setDrivers, point.stop_id, row)}
                 renderAddress={(action) => <div className="driver-input-group">
-                  <AddressInput map={map} value={point.address} label={'Driver ' + (index + 1) + ' location'} nickname={point.label}
+                  <AddressInput map={map} value={point.address} label={'Driver ' + (index + 1) + ' location'} nickname={point.label} placeName={point.place_name}
                     placeholder={'Driver ' + (index + 1) + ' location'} action={action}
                     {...savedChoices(saved, (record) => selectPlace(record, point, setDrivers))}
                     onChange={(patch) => edit(setDrivers, point.stop_id, patch)} />
@@ -398,7 +443,7 @@ export default function LocationInput({ map, directionsRenderer, auth }) {
                 fieldLabel={'Pickup ' + (index + 1)} onSelect={(record) => selectPlace(record, point, setPassengers)}
                 onSaved={(row) => nameSaved(setPassengers, point.stop_id, row)}
                 renderAddress={(action) => <div className="passenger-input-group">
-                  <AddressInput map={map} value={point.address} label={'Pickup ' + (index + 1) + ' location'} nickname={point.label}
+                  <AddressInput map={map} value={point.address} label={'Pickup ' + (index + 1) + ' location'} nickname={point.label} placeName={point.place_name}
                     placeholder={'Pickup ' + (index + 1) + ' location'} action={action}
                     {...savedChoices(saved, (record) => selectPlace(record, point, setPassengers))}
                     onChange={(patch) => edit(setPassengers, point.stop_id, patch)} />
@@ -424,11 +469,11 @@ export default function LocationInput({ map, directionsRenderer, auth }) {
             <SavedLocationControls showPicker={false} auth={auth} point={destination} saved={saved} fieldLabel="Destination"
               onSelect={(record) => selectPlace(record, destination, setDestination, true)}
               onSaved={(row) => setDestination((point) => point.source?.place_id === row.source.place_id
-                ? { ...point, label: row.label } : point)}
+                ? { ...point, label: row.label, saved_id: row.id } : point)}
               renderAddress={(action) => <AddressInput map={map} className="full-width-input" value={destination.address}
                 label="Destination" placeholder="Destination" onChange={editDestination}
                 {...savedChoices(saved, (record) => selectPlace(record, destination, setDestination, true))}
-                nickname={destination.label} action={action} />} />
+                nickname={destination.label} placeName={destination.place_name} action={action} />} />
           </div>
           <button type="button" className={'submit-btn' + (missing ? ' is-unavailable' : '')} disabled={busy}
             aria-disabled={missing ? 'true' : undefined} aria-describedby={missing ? 'calculate-missing' : undefined}

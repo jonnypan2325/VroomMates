@@ -5,6 +5,12 @@ export const hasPlaceSource = (source) => source?.kind === 'google_places' &&
   typeof source.place_id === 'string' && !!source.place_id &&
   !/[\s\p{C}]/u.test(source.place_id) && new TextEncoder().encode(source.place_id).length <= 4096;
 
+/** A landmark's own name, when it says more than the start of its street address. */
+export function landmarkName(name, address) {
+  if (typeof name !== 'string' || !name.trim() || typeof address !== 'string') return '';
+  return address.toLocaleLowerCase().startsWith(name.trim().toLocaleLowerCase()) ? '' : name.trim();
+}
+
 export function resolvePlace(map, placeId, { signal } = {}) {
   return new Promise((resolve, reject) => {
     if (!map || !window.google?.maps?.places?.PlacesService) {
@@ -25,7 +31,7 @@ export function resolvePlace(map, placeId, { signal } = {}) {
     if (signal?.aborted) { abort(); return; }
     try {
       const service = new window.google.maps.places.PlacesService(map);
-      service.getDetails({ placeId, fields: ['place_id', 'formatted_address', 'geometry.location'] },
+      service.getDetails({ placeId, fields: ['place_id', 'name', 'formatted_address', 'geometry.location'] },
         (place, status) => {
           if (finished) return;
           const location = place?.geometry?.location;
@@ -34,7 +40,7 @@ export function resolvePlace(map, placeId, { signal } = {}) {
             done(new Error('This saved location could not be found. Please retry or choose another place.'));
             return;
           }
-          done(null, { address: place.formatted_address, coordinates,
+          done(null, { address: place.formatted_address, coordinates, place_name: landmarkName(place.name, place.formatted_address),
             source: { kind: 'google_places', place_id: placeId } });
         });
     } catch {

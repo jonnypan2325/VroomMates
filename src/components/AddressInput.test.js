@@ -9,7 +9,7 @@ const rows = [{ id: 'home', label: 'Home', source }, { id: 'work', label: 'Work'
 const point = { address: 'Synthetic resolved address', source, coordinates: { lat: 35, lng: -120 }, label: 'Earlier label' };
 const place = (changes = {}) => ({ place_id: source.place_id, formatted_address: point.address,
   geometry: { location: { lat: () => 35, lng: () => -120 } }, ...changes });
-const invalid = { coordinates: { lat: null, lng: null }, source: null, label: '' };
+const invalid = { coordinates: { lat: null, lng: null }, source: null, label: '', place_name: '', saved_id: null };
 const deferred = () => { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; };
 let instances;
 beforeEach(() => {
@@ -48,13 +48,14 @@ it('typing replaces a previously resolved point with text and clears source, coo
 it('a valid suggestion emits only fresh address, coordinates and place reference and uses current onChange', () => {
   const first = jest.fn(), latest = jest.fn(), map = {};
   const { rerender } = render(<AddressInput map={map} value="Draft" label="Pickup" onChange={first} />);
-  expect(instances[0].options.fields).toEqual(['place_id', 'formatted_address', 'geometry.location']);
+  expect(instances[0].options.fields).toEqual(['place_id', 'name', 'formatted_address', 'geometry.location']);
   expect(instances[0].bindTo).toHaveBeenCalledWith('bounds', map);
   expect(instances[0].event).toBe('place_changed');
   rerender(<AddressInput map={map} value="Draft" label="Pickup" onChange={latest} />);
   autocompleteSelect();
   expect(first).not.toHaveBeenCalled();
-  expect(latest).toHaveBeenCalledWith({ address: point.address, coordinates: point.coordinates, source, label: '' });
+  expect(latest).toHaveBeenCalledWith({ address: point.address, coordinates: point.coordinates, source, label: '',
+    saved_id: null, place_name: '' });
   expect(instances).toHaveLength(1);
 });
 
@@ -134,7 +135,8 @@ it('a fresh provider suggestion supersedes an in-flight saved lookup and suppres
   render(<Harness map={{}} initial="" onPatch={onPatch} savedLocations={rows} onSavedSelect={() => pending.promise} />);
   focusField(); savedSelect('Work');
   autocompleteSelect();
-  expect(onPatch).toHaveBeenCalledWith({ address: point.address, source, coordinates: point.coordinates, label: '' });
+  expect(onPatch).toHaveBeenCalledWith({ address: point.address, source, coordinates: point.coordinates, label: '',
+    saved_id: null, place_name: '' });
   expect(loading()).not.toBeInTheDocument();
   await act(async () => { pending.reject(new Error('Old lookup')); await pending.promise.catch(() => {}); });
   expect(screen.queryByRole('alert')).not.toBeInTheDocument();
@@ -204,17 +206,41 @@ it('arrow keys and Enter choose a saved place, and Escape closes the list', () =
   expect(loading()).toHaveTextContent('Loading saved place…');
 });
 
-it('a named place shows its nickname over the address and clicking it returns to text editing', () => {
+it('a named place shows its nickname over the address and opens full details before editing', () => {
   render(<Harness nickname="Home" savedLocations={rows} onSavedSelect={jest.fn()} />);
-  const named = screen.getByRole('button', { name: `Pickup: Home, ${point.address}. Change address` });
+  const named = screen.getByRole('button', { name: `Pickup: Home, ${point.address}` });
   expect(named).toHaveClass('address-named');
   expect(named).toHaveTextContent(`Home${point.address}`);
   expect(screen.queryByRole('combobox')).not.toBeInTheDocument();
   fireEvent.click(named);
-  expect(screen.queryByRole('button', { name: /Change address/ })).not.toBeInTheDocument();
+  const details = screen.getByRole('dialog', { name: 'Details for Pickup' });
+  expect(details).toHaveTextContent(`Home${point.address}Change address`);
+  expect(named).toHaveAttribute('aria-expanded', 'true');
+  fireEvent.keyDown(details, { key: 'Escape' });
+  expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+  expect(named).toHaveFocus();
+  fireEvent.click(named);
+  fireEvent.click(screen.getByRole('button', { name: 'Change address' }));
+  expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
   expect(field()).toHaveFocus();
   expect(field()).toHaveValue(point.address);
   expect(screen.queryByRole('listbox')).not.toBeInTheDocument();
   act(() => { field().blur(); });
-  expect(screen.getByRole('button', { name: /Change address/ })).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: `Pickup: Home, ${point.address}` })).toBeInTheDocument();
+});
+
+it('a landmark leads with its own name, a street address does not, and a nickname wins', () => {
+  const onPatch = jest.fn();
+  const { unmount } = render(<Harness map={{}} initial="" onPatch={onPatch} />);
+  instances[0].place = place({ name: 'Synthetic Market', formatted_address: '1 Synthetic Way, Testville' });
+  autocompleteSelect();
+  expect(onPatch).toHaveBeenLastCalledWith(expect.objectContaining({ place_name: 'Synthetic Market', label: '' }));
+  instances[0].place = place({ name: '1 Synthetic Way', formatted_address: '1 Synthetic Way, Testville' });
+  autocompleteSelect();
+  expect(onPatch).toHaveBeenLastCalledWith(expect.objectContaining({ place_name: '' }));
+  unmount();
+  const { rerender } = render(<Harness placeName="Synthetic Market" />);
+  expect(screen.getByRole('button', { name: `Pickup: Synthetic Market, ${point.address}` })).toBeInTheDocument();
+  rerender(<Harness placeName="Synthetic Market" nickname="Home" />);
+  expect(screen.getByRole('button', { name: `Pickup: Home, ${point.address}` })).toBeInTheDocument();
 });

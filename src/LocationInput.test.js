@@ -6,9 +6,9 @@ import { resolvePlace } from './saving/places';
 
 jest.mock('./saving/places', () => ({ ...jest.requireActual('./saving/places'), resolvePlace: jest.fn() }));
 const mockHome = { id: 'saved-home', label: 'Home', source: { kind: 'google_places', place_id: 'home' } };
-const mockSaved = { locations: [mockHome], save: jest.fn(), remove: jest.fn(), edit: jest.fn() };
+const mockSaved = { locations: [mockHome], loading: false, save: jest.fn(), remove: jest.fn(), edit: jest.fn() };
 jest.mock('./saving/useSavedLocations', () => () => ({
-  locations: mockSaved.locations, loading: false, error: null, refresh: jest.fn().mockResolvedValue(),
+  locations: mockSaved.locations, loading: mockSaved.loading, error: null, refresh: jest.fn().mockResolvedValue(),
   save: (...args) => mockSaved.save(...args), remove: (...args) => mockSaved.remove(...args), edit: (...args) => mockSaved.edit(...args),
 }));
 jest.mock('./saving/SavedTripsPanel', () => function TripBoundary({ snapshot, openedTrip, onOpened }) {
@@ -45,6 +45,7 @@ beforeEach(() => {
   } } };
   resolvePlace.mockReset();
   mockSaved.locations = [mockHome];
+  mockSaved.loading = false;
   mockSaved.save.mockReset(); mockSaved.remove.mockReset(); mockSaved.edit.mockReset();
 });
 afterEach(() => { delete global.fetch; delete window.google; });
@@ -292,4 +293,45 @@ test('an account change ends the chance to undo Start over, so private fields ca
   expect(screen.queryByRole('button', { name: 'Undo' })).not.toBeInTheDocument();
   expect(screen.queryByText('Planner cleared.')).not.toBeInTheDocument();
   expect(screen.getByLabelText('Pickup 1 location')).toHaveValue('');
+});
+
+test('rows picked from My locations follow its later rename, move and deletion, but not a loading list', async () => {
+  resolvePlace.mockResolvedValue({ address: 'Old home address', coordinates: { lat: 1, lng: 1 }, place_name: '',
+    source: mockHome.source });
+  const view = show();
+  const again = () => view.rerender(<LocationInput auth={auth} map={map} directionsRenderer={renderer} />);
+  await useSaved('Driver 1 location');
+  expect(screen.getByText('Driver 1 location nickname: Home')).toBeInTheDocument();
+  mockSaved.locations = [{ ...mockHome, label: 'Home base' }];
+  again();
+  expect(await screen.findByText('Driver 1 location nickname: Home base')).toBeInTheDocument();
+  const moved = { kind: 'google_places', place_id: 'new-home' };
+  resolvePlace.mockResolvedValue({ address: 'New home address', coordinates: { lat: 2, lng: 2 }, place_name: '', source: moved });
+  mockSaved.locations = [{ ...mockHome, label: 'Home base', source: moved }];
+  await act(async () => { again(); });
+  await waitFor(() => expect(screen.getByLabelText('Driver 1 location')).toHaveValue('New home address'));
+  expect(resolvePlace).toHaveBeenLastCalledWith(map, 'new-home', expect.anything());
+  expect(screen.getByText('Driver 1 location nickname: Home base')).toBeInTheDocument();
+  mockSaved.loading = true; mockSaved.locations = [];
+  again();
+  expect(screen.getByText('Driver 1 location nickname: Home base')).toBeInTheDocument();
+  mockSaved.loading = false; mockSaved.locations = [];
+  again();
+  await waitFor(() => expect(screen.queryByText(/Driver 1 location nickname/)).not.toBeInTheDocument());
+  expect(screen.getByLabelText('Driver 1 location')).toHaveValue('New home address');
+});
+
+test('a saved trip keeps only the nickname and place reference, never the landmark name or saved-location link', async () => {
+  resolvePlace.mockResolvedValue({ address: 'Home address', coordinates: { lat: 1, lng: 1 }, place_name: 'Synthetic Landmark',
+    source: mockHome.source });
+  show();
+  await useSaved('Driver 1 location');
+  fill('Pickup 1 location', 'Pickup'); fill('Destination', 'Destination');
+  fetch.mockResolvedValue(responseFor(1)); calculate();
+  await screen.findByRole('heading', { name: 'Your route' });
+  const snapshot = screen.getByTestId('frozen-trip').textContent;
+  expect(JSON.parse(snapshot).inputs.drivers[0]).toEqual(expect.objectContaining({ label: 'Home', source: mockHome.source }));
+  expect(snapshot).not.toContain('Synthetic Landmark');
+  expect(snapshot).not.toContain('saved_id');
+  expect(snapshot).not.toContain('saved-home');
 });
