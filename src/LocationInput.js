@@ -51,6 +51,8 @@ function SavedRowSync({ saved, map, drivers, passengers, destination, setDrivers
     const controller = new AbortController();
     moved.forEach(async (savedId) => {
       const row = byId.get(savedId);
+      // Any route through the old place is stale as soon as the move is known, even if the lookup fails.
+      onMove(savedId);
       try {
         const details = await resolvePlace(map, row.source.place_id, { signal: controller.signal });
         if (controller.signal.aborted) return;

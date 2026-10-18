@@ -375,3 +375,18 @@ test('an optimizer error page that is not JSON shows a service message, not a pa
   expect(await screen.findByRole('alert')).toHaveTextContent('The route optimizer is unavailable. Please retry.');
   expect(screen.getByRole('alert')).not.toHaveTextContent('Unexpected token');
 });
+
+test('a saved place that moves clears a route through it even when its new place cannot be looked up', async () => {
+  resolvePlace.mockResolvedValue({ address: 'Home address', coordinates: { lat: 1, lng: 1 }, place_name: '', source: mockHome.source });
+  const view = show();
+  await useSaved('Driver 1 location');
+  fill('Pickup 1 location', 'Pickup'); fill('Destination', 'Destination');
+  fetch.mockResolvedValue(responseFor(1)); calculate();
+  await screen.findByRole('heading', { name: 'Your route' });
+  resolvePlace.mockRejectedValue(new Error('Places timed out'));
+  mockSaved.locations = [{ ...mockHome, source: { kind: 'google_places', place_id: 'new-home' } }];
+  await act(async () => { view.rerender(<LocationInput auth={auth} map={map} directionsRenderer={renderer} />); });
+  expect(screen.queryByRole('heading', { name: 'Your route' })).not.toBeInTheDocument();
+  expect(screen.getByTestId('frozen-trip')).toHaveTextContent('null');
+  expect(screen.getByRole('alert')).toHaveTextContent('A saved place in this route moved');
+});
