@@ -298,9 +298,15 @@ export default function LocationInput({ map, directionsRenderer, auth }) {
         }),
       });
       if (!current(captured)) return;
-      const body = await response.json();
+      let body = null;
+      // A gateway or proxy error page is not JSON; its status still says what went wrong.
+      try { body = await response.json(); } catch (_) { body = null; }
       if (!current(captured)) return;
-      if (!response.ok) throw new Error(typeof body.error === 'string' ? body.error : 'The route could not be calculated. Please check your inputs.');
+      if (!response.ok) {
+        throw new Error(typeof body?.error === 'string' ? body.error : response.status >= 500
+          ? 'The route optimizer is unavailable. Please retry.' : 'The route could not be calculated. Please check your inputs.');
+      }
+      if (!body) throw new Error('The route optimizer sent an unreadable reply. Please retry.');
       const frozen = makeResult(inputs, body.optimizedRoutes);
       setResult(frozen);
       setSelectedDriver(0);

@@ -367,3 +367,11 @@ test('a saved place that moves clears a calculated route through it, so it is ca
   expect(screen.getByTestId('frozen-trip')).toHaveTextContent('null');
   expect(screen.getByRole('alert')).toHaveTextContent('A saved place in this route moved');
 });
+
+test('an optimizer error page that is not JSON shows a service message, not a parser error', async () => {
+  show(); fillTrip(1);
+  fetch.mockResolvedValue({ ok: false, status: 502, json: async () => { throw new SyntaxError("Unexpected token '<'"); } });
+  calculate();
+  expect(await screen.findByRole('alert')).toHaveTextContent('The route optimizer is unavailable. Please retry.');
+  expect(screen.getByRole('alert')).not.toHaveTextContent('Unexpected token');
+});
