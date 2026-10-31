@@ -1,14 +1,32 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { SavedApiError, canonicalText, newId, requestJSON, sameData } from './api';
 import { canonicalSnapshot, readTrip } from './SavedTripsPanel';
+import { validArriveBy } from './tripSnapshot';
 
 const shortPlace = (point) => point.label || point.place_name || (point.address || '').split(',')[0].trim() || 'destination';
+const titleOf = (place, day) => canonicalText(`Trip to ${place}, ${day.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}`, 200, 200);
+// An arrive-by time is the destination's wall clock, so its date is read without a time zone.
+const arriveDay = (value) => new Date(Number(value.slice(0, 4)), Number(value.slice(5, 7)) - 1, Number(value.slice(8, 10)));
 
-/** "Trip to BCD Tofu, Oct 22": renamable, and always within the 200-character title limit. */
-export function automaticTitle(result, now = new Date()) {
-  const place = Array.from(shortPlace(result.inputs.destination)).slice(0, 80).join('');
-  const day = now.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
-  return canonicalText(`Trip to ${place}, ${day}`, 200, 200);
+/** What an automatic title is made from: the destination's short name and the arrive-by time, if any. */
+export const titleFacts = (result) => ({ place: Array.from(shortPlace(result.inputs.destination)).slice(0, 80).join(''),
+  arriveBy: validArriveBy(result.inputs.arrive_by) ? result.inputs.arrive_by : '' });
+
+/** "Trip to BCD Tofu, Oct 22", dated by the arrive-by time when there is one: renamable, and within the 200-character limit. */
+export const automaticTitle = (result, now = new Date()) => titleFromFacts(titleFacts(result), now);
+const titleFromFacts = (facts, now) => titleOf(facts.place, facts.arriveBy ? arriveDay(facts.arriveBy) : now);
+
+/**
+ * The title after a change from `before` to `after`. A title that is still automatic, for the old
+ * destination on the day the trip was saved or its old arrive-by date, follows the change; one the
+ * person chose, or a copy's, stays as it is.
+ */
+export function followTitle(title, before, after, createdAt) {
+  const created = createdAt ? new Date(createdAt) : null;
+  const days = [created, before.arriveBy && arriveDay(before.arriveBy)].filter(Boolean);
+  if (!days.some((day) => titleOf(before.place, day) === title)) return title;
+  const day = after.arriveBy ? arriveDay(after.arriveBy) : created;
+  return day ? titleOf(after.place, day) : title;
 }
 
 // After a save, any newer names for the same route are saved next.
@@ -17,7 +35,7 @@ function followLatest(lane, resultId, sent) {
   if (!lane.next && latest?.resultId === resultId && latest.snapshot !== sent) lane.next = { ...latest };
 }
 
-const copyTitle = (title) => canonicalText(Array.from('Copy of ' + title).slice(0, 200).join(''), 200, 200);
+export const copyTitle = (title) => canonicalText(Array.from('Copy of ' + title).slice(0, 200).join(''), 200, 200);
 
 /**
  * Calculating a route saves it for a signed-in user: the first calculation creates the trip and
@@ -33,7 +51,10 @@ export default function useTripAutoSave({ auth, result, trip, onTrip, onChanged 
   const queue = useRef({ scope, busy: false, next: null, done: new Set(), retry: null, latest: null });
   const [state, setState] = useState({ scope, resultId: null, phase: 'idle', message: '' });
 
-  if (queue.current.scope !== scope) queue.current = { scope, busy: false, next: null, done: new Set(), retry: null, latest: null };
+  if (queue.current.scope !== scope) {
+    queue.current.rename?.reject(new Error('The account changed.'));
+    queue.current = { scope, busy: false, next: null, done: new Set(), retry: null, latest: null };
+  }
 
   const report = useCallback((owner, change) => {
     if (live.current.scope === owner) setState((old) => ({ ...old, scope: owner, ...change }));
@@ -57,7 +78,8 @@ export default function useTripAutoSave({ auth, result, trip, onTrip, onChanged 
       }
       if (live.current.scope === owner) {
         // A save queued behind this one must update this trip, even before the next render.
-        live.current.trip = { id: saved.id, title: saved.title, opened: false };
+        live.current.trip = { id: saved.id, title: saved.title, opened: false, created_at: saved.created_at,
+          ...(saved.updated_at ? { updated_at: saved.updated_at } : {}), facts: job.facts };
         live.current.onTrip(live.current.trip);
       }
       return saved;
@@ -68,7 +90,8 @@ export default function useTripAutoSave({ auth, result, trip, onTrip, onChanged 
       throw new SavedApiError(503, 'INVALID_RESPONSE', 'The change could not be confirmed.');
     }
     if (live.current.scope === owner && live.current.trip?.id === saved.id) {
-      live.current.trip = { ...live.current.trip, title: saved.title };
+      live.current.trip = { ...live.current.trip, title: saved.title, ...(saved.updated_at ? { updated_at: saved.updated_at } : {}),
+        ...(job.facts ? { facts: job.facts } : {}) };
       live.current.onTrip(live.current.trip);
     }
     return saved;
@@ -76,18 +99,39 @@ export default function useTripAutoSave({ auth, result, trip, onTrip, onChanged 
 
   const drain = useCallback(async () => {
     const lane = queue.current;
-    if (lane.busy || !lane.next) return;
-    const { resultId, snapshot, asNew } = lane.next;
+    if (lane.busy) return;
+    if (lane.rename) {
+      // A new name waits its turn, so it never crosses a save that also sets the title.
+      const { title, resolve, reject } = lane.rename;
+      lane.rename = null;
+      lane.busy = true;
+      const current = live.current.trip;
+      try {
+        if (!current) throw new Error('This trip is not saved yet.');
+        await send({ scope: lane.scope, kind: 'update', id: current.id, body: { title } });
+        resolve();
+        if (queue.current === lane) live.current.onChanged?.();
+      } catch (error) { reject(error); } finally {
+        lane.busy = false;
+        if (queue.current === lane) void drain();
+      }
+      return;
+    }
+    if (!lane.next) return;
+    const { resultId, snapshot, asNew, facts } = lane.next;
     lane.next = null;
     lane.busy = true;
     const owner = lane.scope;
     const current = live.current.trip;
     let job;
     try {
+      // The title and the route travel in one save, so they never disagree.
+      const title = current && !asNew && current.facts ? followTitle(current.title, current.facts, facts, current.created_at) : current?.title;
       job = current && !asNew
-        ? { scope: owner, kind: 'update', id: current.id, body: { snapshot: canonicalSnapshot(snapshot) } }
-        : { scope: owner, kind: 'create', body: { id: newId(), title: asNew && current ? copyTitle(current.title) : lane.title(),
-          snapshot: canonicalSnapshot(snapshot) } };
+        ? { scope: owner, kind: 'update', id: current.id, facts,
+          body: { ...(title !== current.title ? { title } : {}), snapshot: canonicalSnapshot(snapshot) } }
+        : { scope: owner, kind: 'create', facts, body: { id: newId(),
+          title: asNew && current ? copyTitle(current.title) : titleFromFacts(facts, new Date()), snapshot: canonicalSnapshot(snapshot) } };
     } catch (_) {
       lane.busy = false;
       report(owner, { resultId, phase: 'unsavable', message: 'This route cannot be saved. Choose a Google place for every stop and calculate again.' });
@@ -105,7 +149,7 @@ export default function useTripAutoSave({ auth, result, trip, onTrip, onChanged 
       if (queue.current !== lane) return;
       // A definite rejection starts over with a new ID; anything unclear retries this exact save.
       const definite = error instanceof SavedApiError && [400, 404, 409, 413, 415].includes(error.status);
-      lane.retry = { resultId, snapshot, asNew, job: definite ? null : { ...job, reconcile: job.kind === 'create' } };
+      lane.retry = { resultId, snapshot, asNew, facts, job: definite ? null : { ...job, reconcile: job.kind === 'create' } };
       report(owner, { resultId, phase: 'error', message: error?.status === 401 ? 'Your sign-in expired.' : '' });
     } finally {
       lane.busy = false;
@@ -115,7 +159,7 @@ export default function useTripAutoSave({ auth, result, trip, onTrip, onChanged 
 
   const enqueue = useCallback((request) => {
     queue.current.next = request;
-    queue.current.latest = { resultId: request.resultId, snapshot: request.snapshot };
+    queue.current.latest = { resultId: request.resultId, snapshot: request.snapshot, facts: request.facts };
     void drain();
   }, [drain]);
 
@@ -127,8 +171,7 @@ export default function useTripAutoSave({ auth, result, trip, onTrip, onChanged 
       report(scope, { resultId: result.id, phase: 'unsavable', message: result.saveError });
       return;
     }
-    lane.title = () => automaticTitle(result);
-    enqueue({ resultId: result.id, snapshot: result.snapshot });
+    enqueue({ resultId: result.id, snapshot: result.snapshot, facts: titleFacts(result) });
   }, [scope, result, enqueue, report]);
 
   const retry = useCallback(() => {
@@ -153,37 +196,36 @@ export default function useTripAutoSave({ auth, result, trip, onTrip, onChanged 
 
   const saveAsNew = useCallback(() => {
     if (!result?.snapshot || !live.current.trip) return;
-    if (!queue.current.title) queue.current.title = () => automaticTitle(result);
-    enqueue({ resultId: result.id, snapshot: result.snapshot, asNew: true });
+    enqueue({ resultId: result.id, snapshot: result.snapshot, asNew: true, facts: titleFacts(result) });
   }, [result, enqueue]);
 
   const saveAgain = useCallback(() => {
     if (!result?.snapshot) return;
-    queue.current.title = () => automaticTitle(result);
-    enqueue({ resultId: result.id, snapshot: result.snapshot });
+    enqueue({ resultId: result.id, snapshot: result.snapshot, facts: titleFacts(result) });
   }, [result, enqueue]);
 
   // New names, or a new arrive-by time, update the trip saved for this route, or the save still under way.
   const saveEdits = useCallback((next) => {
     const lane = queue.current;
     if (!scope || !next?.snapshot) return;
-    // A trip reopened into the planner has no automatic title yet; a save that must create it needs one.
-    if (!lane.title) lane.title = () => automaticTitle(next);
     // A queued "Save as new trip" stays a copy.
-    const request = { resultId: next.id, snapshot: next.snapshot, asNew: lane.next?.resultId === next.id && lane.next.asNew };
+    const request = { resultId: next.id, snapshot: next.snapshot, facts: titleFacts(next),
+      asNew: lane.next?.resultId === next.id && lane.next.asNew };
     if (live.current.trip || lane.busy || lane.next) { enqueue(request); return; }
     lane.latest = request;
     // A failed first save retries with the names as they are now.
-    if (lane.retry && !lane.retry.job && lane.retry.resultId === next.id) lane.retry = { ...lane.retry, snapshot: next.snapshot };
+    if (lane.retry && !lane.retry.job && lane.retry.resultId === next.id) lane.retry = { ...lane.retry, snapshot: next.snapshot, facts: request.facts };
   }, [scope, enqueue]);
 
-  const rename = useCallback(async (next) => {
-    const current = live.current.trip;
-    if (!current) return;
+  const rename = useCallback((next) => new Promise((resolve, reject) => {
+    const lane = queue.current;
+    if (!live.current.trip && !lane.busy) { resolve(); return; }
     const title = canonicalText(next, 200, 200);
-    await send({ scope, kind: 'update', id: current.id, body: { title } });
-    live.current.onChanged?.();
-  }, [scope, send]);
+    // A newer name replaces one still waiting.
+    lane.rename?.resolve();
+    lane.rename = { title, resolve, reject };
+    void drain();
+  }), [drain]);
 
   const active = state.scope === scope && state.resultId === result?.id ? state : null;
   let phase = 'idle';

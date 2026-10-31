@@ -6,7 +6,7 @@ from flask import g, request
 
 from .auth import require_google_identity
 from .saved_api import (SavedRequestError, canonical_uuid, decode_trip_cursor,
-                        encode_trip_cursor, place_source, private_json,
+                        encode_trip_cursor, parse_stamp, place_source, private_json,
                         read_object, saved_errors, text)
 from .saved_store import SavedNotFound, StoreCorrupt
 
@@ -116,9 +116,18 @@ def _create_record(value):
             'snapshot': validate_snapshot(value['snapshot'])}
 
 
+def _edited(value):
+    """The optional last-edit time: a trip saved before edit times has none, and an edit never precedes creation."""
+    if 'updated_at' not in value:
+        return {}
+    if parse_stamp(value['updated_at']) < parse_stamp(value['created_at']):
+        raise ValueError()
+    return {'updated_at': value['updated_at']}
+
+
 def _public_record(value, expected_id=None):
     try:
-        _fields(value, {'id', 'title', 'created_at', 'snapshot'})
+        _fields(value, {'id', 'title', 'created_at', 'snapshot'}, {'updated_at'})
         record = _create_record({key: value[key] for key in ('id', 'title', 'snapshot')})
         encode_trip_cursor((value['created_at'], record['id']))
         if expected_id is not None and record['id'] != expected_id:
@@ -126,19 +135,20 @@ def _public_record(value, expected_id=None):
         # Stored canonical content is never silently normalized/repaired on load.
         if record != {key: value[key] for key in ('id', 'title', 'snapshot')}:
             raise ValueError()
-        return dict(record, created_at=value['created_at'])
+        return dict(record, created_at=value['created_at'], **_edited(value))
     except (ValueError, TypeError, KeyError):
         raise StoreCorrupt() from None
 
 
 def _summary(value):
     try:
-        _fields(value, {'id', 'title', 'created_at', 'schema_version', 'driver_count', 'passenger_count'}, {'arrive_by'})
+        _fields(value, {'id', 'title', 'created_at', 'schema_version', 'driver_count', 'passenger_count'}, {'arrive_by', 'updated_at'})
         ident = canonical_uuid(value['id'])
         if 'arrive_by' in value:
             _arrive_by(value['arrive_by'])
         title = text(value['title'], 200, 200)
         encode_trip_cursor((value['created_at'], ident))
+        _edited(value)
         if (title != value['title'] or type(value['schema_version']) is not int or value['schema_version'] != 1
                 or type(value['driver_count']) is not int or not 1 <= value['driver_count'] <= MAX_DRIVERS
                 or type(value['passenger_count']) is not int or not 1 <= value['passenger_count'] <= MAX_PASSENGERS):

@@ -78,15 +78,23 @@ function validStamp(value) {
   return typeof value === 'string' && STAMP.test(value) && Number.isFinite(Date.parse(value));
 }
 
+// The last edit time is optional (trips saved before it have none) and never before the trip was saved.
+const validEdit = (trip) => trip.updated_at === undefined
+  || (validStamp(trip.updated_at) && Date.parse(trip.updated_at) >= Date.parse(trip.created_at));
+
+/** When a trip was last changed: its last edit, or its save for trips saved before edits were dated. */
+export const editedDate = (trip) => new Date(trip.updated_at || trip.created_at)
+  .toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+
 export function readTrip(body, id) {
   fields(body, ['trip']);
   const trip = body.trip;
-  fields(trip, ['id', 'title', 'created_at', 'snapshot']);
-  if (trip.id !== id || !UUID.test(trip.id) || !validStamp(trip.created_at)) throw new Error('Invalid saved trip response.');
+  fields(trip, ['id', 'title', 'created_at', 'snapshot'], ['updated_at']);
+  if (trip.id !== id || !UUID.test(trip.id) || !validStamp(trip.created_at) || !validEdit(trip)) throw new Error('Invalid saved trip response.');
   const title = canonicalText(trip.title, 200, 200);
   const snapshot = canonicalSnapshot(trip.snapshot);
   if (title !== trip.title || !sameData(snapshot, trip.snapshot)) throw new Error('Invalid saved trip response.');
-  return { id: trip.id, title, created_at: trip.created_at, snapshot };
+  return { id: trip.id, title, created_at: trip.created_at, ...(trip.updated_at ? { updated_at: trip.updated_at } : {}), snapshot };
 }
 
 function readList(body) {
@@ -96,9 +104,9 @@ function readList(body) {
         && /^[A-Za-z0-9_-]{1,512}$/.test(body.next_cursor)))) throw new Error('Invalid saved trips response.');
   const ids = new Set();
   return { trips: body.trips.map((trip) => {
-    fields(trip, ['id', 'title', 'created_at', 'schema_version', 'driver_count', 'passenger_count'], ['arrive_by']);
+    fields(trip, ['id', 'title', 'created_at', 'schema_version', 'driver_count', 'passenger_count'], ['arrive_by', 'updated_at']);
     if (trip.arrive_by !== undefined && !validArriveBy(trip.arrive_by)) throw new Error('Invalid saved trip summary.');
-    if (typeof trip.id !== 'string' || !UUID.test(trip.id) || ids.has(trip.id) || !validStamp(trip.created_at)
+    if (typeof trip.id !== 'string' || !UUID.test(trip.id) || ids.has(trip.id) || !validStamp(trip.created_at) || !validEdit(trip)
         || trip.schema_version !== 1 || !Number.isInteger(trip.driver_count) || trip.driver_count < 1 || trip.driver_count > 64
         || !Number.isInteger(trip.passenger_count) || trip.passenger_count < 1 || trip.passenger_count > 256
         || canonicalText(trip.title, 200, 200) !== trip.title) throw new Error('Invalid saved trip summary.');
@@ -117,9 +125,9 @@ function failureMessage(error, fallback) {
   return fallback;
 }
 
-// A saved trip is dated by when everyone arrives, in full ("arrive Oct 30, 2026"), or else by when it was saved.
+// A saved trip is dated by when everyone arrives, in full ("arrive Oct 30, 2026"), or else by its last edit.
 function tripDate(trip) {
-  if (!trip.arrive_by) return new Date(trip.created_at).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+  if (!trip.arrive_by) return 'last edited ' + editedDate(trip);
   const [year, month, day] = trip.arrive_by.slice(0, 10).split('-').map(Number);
   return 'arrive ' + new Date(year, month - 1, day).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
 }

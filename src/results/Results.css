@@ -110,7 +110,13 @@
 .trip-notice button { margin: 0; width: auto; }
 .trip-notice .trip-notice-primary { background: var(--accent-dark); color: #fff; }
 .trip-notice .trip-notice-primary:hover:not(:disabled) { background: var(--accent-ink); }
-.saving-card .trip-view-edit { width: 100%; min-height: 44px; margin-top: 18px; }
+/* Its name keeps the heading's size while it is edited in place. */
+.trip-view-title, input.trip-view-title { font: inherit; color: inherit; }
+input.trip-view-title { width: 100%; }
+/* Edit trip carries on with this trip; Edit a copy, the quieter choice, starts a copy. */
+.trip-view-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin-top: 18px; }
+.saving-card .trip-view-actions .secondary-button { flex: 1 1 12rem; min-height: 44px; margin: 0; }
+.saving-card .trip-view-actions .text-button { min-height: 44px; margin: 0; padding: 0 14px; }
 .trip-notice.route-map-error { margin: 10px 0; }
 
 /* The map's own popup for a tapped marker. */
