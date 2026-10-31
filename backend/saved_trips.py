@@ -30,11 +30,18 @@ def _stop_id(value):
     return value
 
 
-def _point(value, driver=False):
-    _fields(value, {'stop_id', 'source', 'capacity'} if driver else {'stop_id', 'source'}, {'label'})
+def _point(value, driver=False, person=True):
+    _fields(value, {'stop_id', 'source', 'capacity'} if driver else {'stop_id', 'source'},
+            {'label', 'location_id', 'person'} if person else {'label', 'location_id'})
     result = {'stop_id': _stop_id(value['stop_id']),
               'label': text(value.get('label', ''), 1000, 1000, allow_empty=True),
               'source': place_source(value['source'])}
+    if 'location_id' in value:
+        # A stop picked from My locations follows that location; absent on older trips.
+        result['location_id'] = canonical_uuid(value['location_id'])
+    if 'person' in value:
+        # Who is driven or picked up here, for this trip only; the place keeps its own label.
+        result['person'] = text(value['person'], 80, 320)
     if driver:
         capacity = value['capacity']
         if type(capacity) is not int or capacity <= 0:
@@ -58,7 +65,7 @@ def validate_snapshot(value):
         raise ValueError()
     drivers = [_point(row, driver=True) for row in drivers]
     passengers = [_point(row) for row in passengers]
-    destination = _point(inputs['destination'])
+    destination = _point(inputs['destination'], person=False)
     all_ids = [row['stop_id'] for row in drivers + passengers + [destination]]
     if len(set(all_ids)) != len(all_ids) or sum(row['capacity'] for row in drivers) < len(passengers):
         raise ValueError()
