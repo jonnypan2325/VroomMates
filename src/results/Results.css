@@ -1,0 +1,123 @@
+/* Route results: one card per driver, in that driver's map colour. */
+.route-results { margin-top: 28px; }
+.route-results-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 12px;
+  border-bottom: 1px solid var(--border); margin-bottom: 10px; }
+.planner .route-results-heading h3 { margin: 0; padding-bottom: 6px; border-bottom: 0; }
+.route-results-heading .saving-note { margin: 0; line-height: 1.2; }
+.route-overview-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 36px; margin: 6px 0 4px; }
+.route-overview-row .saving-note { margin: 0; }
+.route-overview-row .text-button { margin-left: auto; }
+
+.driver-cards { list-style: none; margin: 8px 0 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.driver-card { border: 1px solid var(--border); border-radius: var(--radius);
+  background: var(--surface); transition: border-color .15s ease-out, opacity .15s ease-out; }
+.driver-card.is-open { border-color: color-mix(in srgb, var(--driver-color) 35%, var(--border)); }
+.driver-card.is-muted .driver-card-swatch { background: #b4b0bd; }
+.planner .driver-card-header { display: flex; align-items: center; gap: 10px; width: 100%; min-height: 52px; margin: 0;
+  padding: 8px 12px; border: 0; border-radius: var(--radius); background: transparent; color: var(--ink);
+  text-align: left; box-shadow: none; }
+.planner .driver-card-header:hover:not(:disabled) { background: var(--accent-wash); color: var(--ink); }
+.planner .driver-card-header:disabled { opacity: 1; cursor: default; }
+.driver-card-header:focus-visible { outline: 3px solid var(--focus-ring); outline-offset: 2px; }
+.driver-card-swatch { flex: 0 0 auto; width: 12px; height: 12px; border-radius: 50%; background: var(--driver-color); }
+.driver-card-title { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.driver-card-name { font-size: .92rem; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.driver-card-from { font-weight: 400; color: var(--ink-soft); }
+.driver-card-meta { font-size: .78rem; font-weight: 400; color: var(--ink-soft); }
+.driver-card-header .chevron { color: var(--ink-icon); }
+.driver-card-body { padding: 2px 12px 12px; }
+
+/* The timeline: each stop's mark on one line in the driver's colour, as on the map. */
+.route-steps { list-style: none; margin: 4px 0 0; padding: 0; }
+.route-step { position: relative; display: flex; align-items: flex-start; gap: 10px; padding: 7px 0; min-width: 0; }
+.route-step:not(:last-child)::after { content: ''; position: absolute; left: 13px; top: 31px; bottom: -7px; width: 2px;
+  background: color-mix(in srgb, var(--driver-color) 45%, transparent); }
+.route-step-mark { position: relative; z-index: 1; flex: 0 0 28px; width: 28px; height: 28px; border-radius: 50%;
+  display: grid; place-items: center; box-sizing: border-box; font-size: .8rem; font-weight: 700; line-height: 1; }
+.route-step-mark.is-start { background: var(--driver-color); color: #fff; }
+.route-step-mark.is-pickup { background: var(--driver-color); color: var(--driver-ink); }
+.route-step-mark.is-destination { background: var(--surface); color: var(--ink); border: 2px solid var(--ink); }
+.route-step-text { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 1px; padding-top: 4px; }
+.route-step-name { font-size: .88rem; font-weight: 600; color: var(--ink); overflow-wrap: anywhere; }
+.route-step-address { font-size: .76rem; line-height: 1.35; color: var(--ink-soft); overflow-wrap: anywhere; }
+.route-step-place { font-size: .8rem; line-height: 1.35; color: var(--ink); overflow-wrap: anywhere; }
+/* Names edit in place like the trip name: plain text, with a dotted underline on hover or focus. */
+.route-steps .route-step-text > .inline-edit { position: relative; z-index: 1; align-self: flex-start; width: auto; min-height: 0;
+  padding: 0; font-size: .88rem; font-weight: 600; line-height: 1.35; color: var(--ink); }
+.route-steps .route-step-text > .inline-edit-input { font-size: .88rem; font-weight: 600; line-height: 1.35; padding: 0; }
+.route-steps .route-step-text > .inline-edit-input::placeholder { color: var(--ink-soft); font-weight: 400; }
+.route-step-place.is-while-editing { display: none; }
+.route-steps .route-step-text > .inline-edit-input ~ .route-step-place.is-while-editing { display: block; }
+.route-name-hint .for-touch { display: none; }
+.route-step-meta { flex: 0 0 auto; display: flex; flex-direction: column; align-items: flex-end; gap: 1px; padding-top: 4px;
+  font-size: .78rem; color: var(--ink-soft); text-align: right; white-space: nowrap; }
+.route-step-meta > span:first-child { color: var(--ink); font-weight: 600; }
+.route-step-meta > .route-step-time { color: var(--ink); font-weight: 500; }
+
+/* Handing a route to a phone. */
+.route-actions { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border); }
+.route-actions > .saving-note:first-child { margin: 0 0 8px; }
+.route-action-row { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 8px; margin-bottom: 6px; }
+.route-part-label { flex-basis: 100%; font-size: .78rem; font-weight: 600; color: var(--ink-soft); }
+.route-maps-link { display: inline-flex; align-items: center; min-height: 40px; padding: 0 14px; border-radius: var(--radius);
+  background: var(--accent-dark); color: #fff; font-size: .85rem; font-weight: 500; text-decoration: none; box-sizing: border-box; }
+.route-maps-link:hover { background: var(--accent-ink); }
+.route-maps-link:focus-visible { outline: 3px solid var(--focus-ring); outline-offset: 2px; }
+.route-qr-toggle { margin-top: 2px; }
+.route-qr { display: flex; flex-wrap: wrap; gap: 16px; margin-top: 8px; }
+.route-qr figure { margin: 0; display: flex; flex-direction: column; align-items: flex-start; gap: 6px; max-width: 240px; }
+.route-qr figcaption { font-size: .76rem; line-height: 1.4; color: var(--ink-soft); }
+.route-qr svg { width: 200px; height: 200px; padding: 8px; background: #fff;
+  border: 1px solid var(--border); border-radius: var(--radius); }
+.route-actions > .saving-note[role='status']:empty { display: none; }
+
+/* Arrive-by time: each driver's leaving and pickup times are worked back from it. */
+.route-arrive { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 10px; margin: 10px 0 2px; }
+.route-arrive label { font-size: .85rem; font-weight: 600; color: var(--ink); }
+.planner .route-arrive input { width: auto; min-height: 40px; margin: 0; padding: 4px 8px; font: inherit; font-size: .9rem; }
+.route-arrive .saving-note { flex-basis: 100%; margin: 0; }
+.route-step-moved { font-size: .76rem; line-height: 1.35; font-weight: 600; color: var(--warning-ink); }
+.route-results-heading h3:focus { outline: none; }
+.trip-status-line:focus { outline: none; }
+
+/* Save status under the route heading. */
+.trip-status { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 8px; min-height: 36px; margin: 0 0 4px;
+  font-size: .85rem; color: var(--ink-soft); }
+.trip-status-name { display: inline-flex; align-items: baseline; gap: 4px; min-width: 0; color: var(--ink-soft); }
+.trip-status .inline-edit { display: inline; font-weight: 600; color: var(--ink); }
+.trip-status .text-button { margin-left: auto; }
+.trip-status .trip-status-signin { margin-left: -10px; }
+.trip-status .trip-status-error { color: var(--danger-ink); font-weight: 600; }
+.trip-status-mark { flex: 0 0 auto; color: var(--success); }
+
+/* A saved trip opened from My trips. */
+.trip-view-back { margin: 0 0 8px -10px; }
+.trip-view-meta { margin: -10px 0 0; font-size: .8rem; }
+.trip-notice { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px 12px; margin: 14px 0 0;
+  padding: 10px 12px; border: 1px solid #ecd9b0; border-radius: var(--radius); background: #fdf7ea; color: var(--warning-ink);
+  font-size: .85rem; line-height: 1.45; }
+.trip-notice p { margin: 0; color: inherit; flex: 1 1 200px; }
+.trip-notice button { margin: 0; width: auto; }
+.trip-notice .trip-notice-primary { background: var(--accent-dark); color: #fff; }
+.trip-notice .trip-notice-primary:hover:not(:disabled) { background: var(--accent-ink); }
+.saving-card .trip-view-edit { width: 100%; min-height: 44px; margin-top: 18px; }
+.trip-notice.route-map-error { margin: 10px 0; }
+
+/* The map's own popup for a tapped marker. */
+.route-info { display: flex; flex-direction: column; gap: 2px; max-width: 240px; font-family: 'Poppins', sans-serif; }
+.route-info strong { font-size: .88rem; color: var(--ink); }
+.route-info span { font-size: .78rem; color: var(--ink-soft); }
+
+@media (pointer: coarse) {
+  .route-maps-link { min-height: var(--tap-target); font-size: 16px; }
+  /* A full-size tap area around each name without spacing the timeline out. */
+  .route-steps .route-step-text > .inline-edit { position: relative; display: block; min-height: 0; }
+  /* Above the address line that follows it, at least 44px each way. */
+  .route-steps .route-step-text > .inline-edit::after { content: ''; position: absolute; inset: -13px -8px; min-width: 44px; }
+  .route-steps .route-step-text > .inline-edit-input { font-size: 16px; }
+  .planner .route-arrive input { min-height: var(--tap-target); font-size: 16px; }
+  .route-actions .text-button, .route-overview-row .text-button, .trip-view-back { min-height: var(--tap-target); }
+  .route-name-hint .for-mouse { display: none; }
+  .route-name-hint .for-touch { display: inline; }
+}
+@media (prefers-reduced-motion: reduce) { .driver-card { transition: none; } }
