@@ -1,3 +1,5 @@
+import { ROUTE_STYLE } from './routeStyle';
+
 // Driver colours, chosen to stay apart from each other, from the purple app chrome and from the grey of unselected routes.
 export const DRIVER_COLORS = ['#2f6fd6', '#d9731a', '#2c834b', '#c2378b', '#117e87', '#8a5a2b', '#c8382f', '#5a4fcf'];
 export const MUTED_COLOR = '#b4b0bd';
@@ -6,6 +8,21 @@ const INK = '#1f2430';
 export const driverColor = (index) => DRIVER_COLORS[index % DRIVER_COLORS.length];
 /** Numbers on a driver's marks: white keeps 4.5:1 on every colour but the orange, which takes dark ink. */
 export const driverInk = (index) => driverColor(index) === '#d9731a' ? INK : '#fff';
+
+/** The drivers most recently chosen, latest first, after choosing `index`. */
+export const viewedFirst = (order, index) => [index, ...order.filter((item) => item !== index)];
+
+/**
+ * Map layers for each route when all are shown: routes never chosen keep driver order at the bottom,
+ * then the chosen ones, the latest on top. Each route takes two layers, its white edge and its line.
+ */
+export function routeLayers(count, order) {
+  const viewed = order.filter((index) => index < count);
+  const stack = [...Array.from({ length: count }, (_, index) => index).filter((index) => !viewed.includes(index)), ...viewed.reverse()];
+  const layers = Array(count);
+  stack.forEach((index, position) => { layers[index] = ROUTE_STYLE.layers.base + ROUTE_STYLE.layers.perRoute * position; });
+  return layers;
+}
 
 /** The nickname when there is one, then a landmark's name, then the street part of the address. */
 export function stopName(point) {

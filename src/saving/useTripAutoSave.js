@@ -41,19 +41,26 @@ export const copyTitle = (title) => canonicalText(Array.from('Copy of ' + title)
  * Calculating a route saves it for a signed-in user: the first calculation creates the trip and
  * later ones update it. Saves run one at a time in order, and a failed save never touches the route.
  * `trip` is the trip the planner is working on ({ id, title, opened }); `onTrip` replaces it.
+ * `session` changes whenever the planner lets go of its work (Start over, opening another trip, deleting
+ * this one): saves still waiting are dropped, and one that lands later is kept for Undo, never attached.
  */
-export default function useTripAutoSave({ auth, result, trip, onTrip, onChanged }) {
+export default function useTripAutoSave({ auth, result, trip, onTrip, onChanged, session = 0 }) {
   const scope = auth?.status === 'authenticated' && typeof auth.profile?.id === 'string'
     ? `${auth.profile.id}:${auth.generation}` : null;
-  const live = useRef({ scope, trip, auth, onTrip, onChanged });
-  live.current = { scope, trip, auth, onTrip, onChanged };
+  const live = useRef({ scope, trip, auth, onTrip, onChanged, session });
+  live.current = { scope, trip, auth, onTrip, onChanged, session };
   // `latest` is the newest snapshot of the route on screen, which a rename can change while a save is under way.
-  const queue = useRef({ scope, busy: false, next: null, done: new Set(), retry: null, latest: null });
+  const queue = useRef({ scope, session, busy: false, next: null, done: new Set(), retry: null, latest: null, kept: new Map() });
   const [state, setState] = useState({ scope, resultId: null, phase: 'idle', message: '' });
 
   if (queue.current.scope !== scope) {
     queue.current.rename?.reject(new Error('The account changed.'));
-    queue.current = { scope, busy: false, next: null, done: new Set(), retry: null, latest: null };
+    queue.current = { scope, session, busy: false, next: null, done: new Set(), retry: null, latest: null, kept: new Map() };
+  }
+  if (queue.current.session !== session) {
+    const lane = queue.current;
+    lane.rename?.reject(new Error('The planner moved on.'));
+    Object.assign(lane, { session, next: null, retry: null, latest: null, rename: null });
   }
 
   const report = useCallback((owner, change) => {
@@ -76,11 +83,14 @@ export default function useTripAutoSave({ auth, result, trip, onTrip, onChanged 
       if (saved.title !== job.body.title || !sameData(saved.snapshot, job.body.snapshot)) {
         throw new SavedApiError(409, 'TRIP_CONFLICT', 'The saved trip has different content.');
       }
-      if (live.current.scope === owner) {
+      const trip = { id: saved.id, title: saved.title, opened: false, created_at: saved.created_at,
+        ...(saved.updated_at ? { updated_at: saved.updated_at } : {}), facts: job.facts };
+      // A trip saved for a planner session that has since moved on waits for Undo instead.
+      if (live.current.scope === owner && live.current.session !== job.session) queue.current.kept.set(job.session, trip);
+      if (live.current.scope === owner && live.current.session === job.session) {
         // A save queued behind this one must update this trip, even before the next render.
-        live.current.trip = { id: saved.id, title: saved.title, opened: false, created_at: saved.created_at,
-          ...(saved.updated_at ? { updated_at: saved.updated_at } : {}), facts: job.facts };
-        live.current.onTrip(live.current.trip);
+        live.current.trip = trip;
+        live.current.onTrip(trip);
       }
       return saved;
     }
@@ -89,9 +99,10 @@ export default function useTripAutoSave({ auth, result, trip, onTrip, onChanged 
     if ((job.body.title && saved.title !== job.body.title) || (job.body.snapshot && !sameData(saved.snapshot, job.body.snapshot))) {
       throw new SavedApiError(503, 'INVALID_RESPONSE', 'The change could not be confirmed.');
     }
-    if (live.current.scope === owner && live.current.trip?.id === saved.id) {
-      live.current.trip = { ...live.current.trip, title: saved.title, ...(saved.updated_at ? { updated_at: saved.updated_at } : {}),
-        ...(job.facts ? { facts: job.facts } : {}) };
+    if (live.current.scope === owner && live.current.session === job.session && live.current.trip?.id === saved.id) {
+      // Only a save that sent a name changes the one shown; a route save's reply may carry a name from elsewhere.
+      live.current.trip = { ...live.current.trip, ...(job.body.title ? { title: saved.title } : {}),
+        ...(saved.updated_at ? { updated_at: saved.updated_at } : {}), ...(job.facts ? { facts: job.facts } : {}) };
       live.current.onTrip(live.current.trip);
     }
     return saved;
@@ -108,7 +119,7 @@ export default function useTripAutoSave({ auth, result, trip, onTrip, onChanged 
       const current = live.current.trip;
       try {
         if (!current) throw new Error('This trip is not saved yet.');
-        await send({ scope: lane.scope, kind: 'update', id: current.id, body: { title } });
+        await send({ scope: lane.scope, session: lane.session, kind: 'update', id: current.id, body: { title } });
         resolve();
         if (queue.current === lane) live.current.onChanged?.();
       } catch (error) { reject(error); } finally {
@@ -118,7 +129,7 @@ export default function useTripAutoSave({ auth, result, trip, onTrip, onChanged 
       return;
     }
     if (!lane.next) return;
-    const { resultId, snapshot, asNew, facts } = lane.next;
+    const { resultId, snapshot, asNew, facts, job: prepared } = lane.next;
     lane.next = null;
     lane.busy = true;
     const owner = lane.scope;
@@ -127,11 +138,11 @@ export default function useTripAutoSave({ auth, result, trip, onTrip, onChanged 
     try {
       // The title and the route travel in one save, so they never disagree.
       const title = current && !asNew && current.facts ? followTitle(current.title, current.facts, facts, current.created_at) : current?.title;
-      job = current && !asNew
-        ? { scope: owner, kind: 'update', id: current.id, facts,
+      job = prepared || (current && !asNew
+        ? { scope: owner, session: lane.session, kind: 'update', id: current.id, facts,
           body: { ...(title !== current.title ? { title } : {}), snapshot: canonicalSnapshot(snapshot) } }
-        : { scope: owner, kind: 'create', facts, body: { id: newId(),
-          title: asNew && current ? copyTitle(current.title) : titleFromFacts(facts, new Date()), snapshot: canonicalSnapshot(snapshot) } };
+        : { scope: owner, session: lane.session, kind: 'create', facts, body: { id: newId(),
+          title: asNew && current ? copyTitle(current.title) : titleFromFacts(facts, new Date()), snapshot: canonicalSnapshot(snapshot) } });
     } catch (_) {
       lane.busy = false;
       report(owner, { resultId, phase: 'unsavable', message: 'This route cannot be saved. Choose a Google place for every stop and calculate again.' });
@@ -146,11 +157,24 @@ export default function useTripAutoSave({ auth, result, trip, onTrip, onChanged 
       live.current.onChanged?.();
       followLatest(lane, resultId, snapshot);
     } catch (error) {
-      if (queue.current !== lane) return;
+      if (queue.current !== lane || lane.session !== job.session) return;
+      const status = error instanceof SavedApiError ? error.status : 0;
+      // Content the server refuses would only be refused again, so there is no Retry.
+      if ([400, 413, 415].includes(status) || (job.kind === 'update' && status === 409)) {
+        report(owner, { resultId, phase: 'unsavable', message: current && !asNew
+          ? 'Your latest changes cannot be saved. Calculate the route again to save it.'
+          : 'This route cannot be saved. Calculate it again to save it.' });
+        return;
+      }
+      // A trip deleted elsewhere lets go of the route, so Retry saves it as a new trip.
+      if (job.kind === 'update' && status === 404 && live.current.trip?.id === job.id) {
+        live.current.trip = null;
+        live.current.onTrip(null);
+      }
       // A definite rejection starts over with a new ID; anything unclear retries this exact save.
-      const definite = error instanceof SavedApiError && [400, 404, 409, 413, 415].includes(error.status);
+      const definite = [404, 409].includes(status);
       lane.retry = { resultId, snapshot, asNew, facts, job: definite ? null : { ...job, reconcile: job.kind === 'create' } };
-      report(owner, { resultId, phase: 'error', message: error?.status === 401 ? 'Your sign-in expired.' : '' });
+      report(owner, { resultId, phase: 'error', message: status === 401 ? 'Your sign-in expired.' : '' });
     } finally {
       lane.busy = false;
       if (queue.current === lane) void drain();
@@ -174,25 +198,24 @@ export default function useTripAutoSave({ auth, result, trip, onTrip, onChanged 
     enqueue({ resultId: result.id, snapshot: result.snapshot, facts: titleFacts(result) });
   }, [scope, result, enqueue, report]);
 
+  // Retry resends a save whose outcome is unclear exactly as it was, or builds a refused one again.
   const retry = useCallback(() => {
     const lane = queue.current;
     const failed = lane.retry;
     if (!failed || lane.busy) return;
     lane.retry = null;
-    if (!failed.job) { enqueue(failed); return; }
-    lane.busy = true;
-    report(lane.scope, { resultId: failed.resultId, phase: 'saving', message: '' });
-    send(failed.job).then(() => {
-      if (queue.current !== lane) return;
-      report(lane.scope, { resultId: failed.resultId, phase: 'saved', message: '' });
-      live.current.onChanged?.();
-      followLatest(lane, failed.resultId, failed.snapshot);
-    }, () => {
-      if (queue.current !== lane) return;
-      lane.retry = failed;
-      report(lane.scope, { resultId: failed.resultId, phase: 'error', message: '' });
-    }).finally(() => { lane.busy = false; if (queue.current === lane) void drain(); });
-  }, [enqueue, report, send, drain]);
+    enqueue(failed);
+  }, [enqueue]);
+
+  // Undo of Start over returns to a planner session; a trip saved for it meanwhile becomes its trip again.
+  useEffect(() => {
+    const lane = queue.current;
+    const kept = lane.kept.get(session);
+    if (!kept || live.current.trip) return;
+    lane.kept.delete(session);
+    live.current.trip = kept;
+    live.current.onTrip(kept);
+  }, [session]);
 
   const saveAsNew = useCallback(() => {
     if (!result?.snapshot || !live.current.trip) return;

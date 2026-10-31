@@ -202,23 +202,42 @@ const withPerson = (point, person) => {
   return person ? { ...rest, person } : rest;
 };
 
-/** Planner rows and result stops; a pickup row matches through any of its people's stop IDs. */
+/**
+ * Planner rows and result stops. A pickup row whose people are only partly named (the optimizer can
+ * share one place between drivers) splits in two at the same place, so each part keeps its own name
+ * and the people to pick up stay the same.
+ */
 export function renamePoints(points, change) {
   if (!change.stopIds) return points;
   const ids = new Set(change.stopIds);
-  return points.map((point) => [point.stop_id, ...(point.occurrenceIds || [])].some((id) => ids.has(id))
-    ? withPerson(point, change.person) : point);
+  return points.flatMap((point) => {
+    if (!point.occurrenceIds) return [ids.has(point.stop_id) ? withPerson(point, change.person) : point];
+    const active = point.occurrenceIds.slice(0, point.count);
+    const named = active.filter((id) => ids.has(id));
+    if (!named.length) return [point];
+    if (named.length === active.length) return [withPerson(point, change.person)];
+    const rest = active.filter((id) => !ids.has(id));
+    // IDs kept for a larger count stay with the people left as they were.
+    const left = { ...point, stop_id: rest[0], count: rest.length, occurrenceIds: [...rest, ...point.occurrenceIds.slice(point.count)] };
+    const renamed = { ...withPerson(point, change.person), stop_id: named[0], count: named.length, occurrenceIds: named };
+    return ids.has(active[0]) ? [renamed, left] : [left, renamed];
+  });
 }
 
-/** A renamed destination keeps its place but no longer follows a saved location, whose own name is unchanged. */
+/**
+ * A renamed destination keeps its place but no longer follows a saved location, whose own name is unchanged.
+ * A name given on a route only names the planner's destination while it is still that route's place.
+ */
 export function renameDestination(point, change) {
-  return change.destination === undefined ? point : { ...point, label: change.destination, saved_id: null };
+  if (change.destination === undefined || (change.place && point.source?.place_id !== change.place)) return point;
+  return { ...point, label: change.destination, saved_id: null };
 }
 
 export function renameInSnapshot(snapshot, change, place) {
   const { drivers, passengers, destination } = snapshot.inputs;
   let renamed = destination;
-  if (change.destination !== undefined) {
+  // As in the planner, a name only applies while the saved destination is still the place it was given for.
+  if (change.destination !== undefined && (!change.place || destination.source?.place_id === change.place)) {
     const { location_id: link, ...rest } = destination;
     // The place shown when renaming, which a reopened trip may have refreshed from the saved location.
     renamed = { ...rest, label: change.destination, source: { kind: 'google_places', place_id: place.place_id } };
@@ -247,5 +266,7 @@ export function nameChange(target, text, result) {
     throw new Error('This destination has moved. Recalculate before renaming it.');
   }
   const name = canonicalText(text, 80, 320, true);
-  return target.destination ? { destination: name } : { stopIds: target.stopIds, person: name };
+  if (!target.destination) return { stopIds: target.stopIds, person: name };
+  const place = result?.inputs.destination.source?.place_id;
+  return place ? { destination: name, place } : { destination: name };
 }

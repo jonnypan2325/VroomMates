@@ -76,6 +76,21 @@ function SavedRowSync({ saved, map, drivers, passengers, destination, setDrivers
   return null;
 }
 
+/**
+ * A trip opened before My locations loaded could not tell which of its places had moved; once the
+ * list arrives it opens again against it, so the moved notice and the rename block apply.
+ */
+function ViewedLinksSync({ saved, map, view, onRelinked }) {
+  useEffect(() => {
+    if (!view?.linksPending || saved.loading || saved.error) return undefined;
+    const controller = new AbortController();
+    reopenSnapshot(view.trip.snapshot, (placeId) => resolvePlace(map, placeId, { signal: controller.signal }), saved.locations)
+      .then((restored) => { if (!controller.signal.aborted) onRelinked(view, restored); }, () => {});
+    return () => controller.abort();
+  }, [view, saved.locations, saved.loading, saved.error, map, onRelinked]);
+  return null;
+}
+
 function AccountBoundary({ auth, savedRef, children }) {
   const saved = useSavedLocations(auth);
   // Opening a trip reads the owner's locations later, outside render.
@@ -145,6 +160,10 @@ export default function LocationInput({ map, auth }) {
   const [error, setError] = useState('');
   const [activeView, setActiveView] = useState('plan');
   const [openedTrip, setOpenedTrip] = useState(null);
+  // A new planner session each time the planner lets go of its work, so saves queued for it never reach other work.
+  const sessions = useRef(0);
+  const [plannerSession, setPlannerSession] = useState(0);
+  const newSession = () => setPlannerSession(sessions.current += 1);
   const [cleared, setCleared] = useState(null);
   const scrollPane = useRef(null);
   const addDriverButton = useRef(null);
@@ -165,12 +184,13 @@ export default function LocationInput({ map, auth }) {
   const selected = selection.id && selection.id === mapResult?.id ? selection.index : null;
   const selectDriver = (index) => setSelection({ id: mapResult?.id || null, index });
   const route = useRouteMap(map, mapResult, selected, mapAttempt);
-  const autoSave = useTripAutoSave({ auth, result: privateStale ? null : result, trip: openedTrip,
+  const autoSave = useTripAutoSave({ auth, result: privateStale ? null : result, trip: openedTrip, session: plannerSession,
     // A saved trip is private, so the planner holding it clears when the account changes.
     onTrip: (trip) => {
       privateOwner.current = authKey;
       setOpenedTrip(trip);
-      // A new title, and the time of the edit, show in the open trip too.
+      // A new title, and the time of the edit, show in the open trip too. A trip deleted elsewhere arrives as null.
+      if (!trip) return;
       setViewedTrip((view) => view?.trip.id === trip.id && (view.trip.title !== trip.title || view.trip.updated_at !== trip.updated_at)
         ? { ...view, trip: { ...view.trip, title: trip.title, ...(trip.updated_at ? { updated_at: trip.updated_at } : {}) } } : view);
     },
@@ -248,9 +268,10 @@ export default function LocationInput({ map, auth }) {
 
   // Clears the planner (and any opened trip) but never saved trips or locations; Undo restores it.
   const startOver = () => {
-    const before = { drivers, passengers, destination, arriveBy, result, openedTrip };
+    const before = { drivers, passengers, destination, arriveBy, result, openedTrip, session: plannerSession };
     invalidate(); setError('');
     setOpenedTrip(null);
+    newSession();
     setDrivers([newDriver()]);
     setPassengers([newPassengerPickup()]);
     setDestination(newPoint());
@@ -268,6 +289,7 @@ export default function LocationInput({ map, auth }) {
     setArriveBy(cleared.arriveBy);
     setResult(cleared.result);
     setOpenedTrip(cleared.openedTrip);
+    setPlannerSession(cleared.session);
   };
   const filled = (point) => Boolean(point.address.trim() || point.source);
   const dirty = Boolean(result || drivers.length !== 1 || passengers.length !== 1
@@ -327,6 +349,8 @@ export default function LocationInput({ map, auth }) {
       }
       if (!body) throw new Error('The route optimizer sent an unreadable reply. Please retry.');
       const frozen = makeResult(inputs, body.optimizedRoutes);
+      // A route calculated while signed in is that account's, like a trip it opens; signed out, it is anyone's.
+      if (auth.status === 'authenticated') privateOwner.current = captured.owner;
       setResult(frozen);
     } catch (failure) {
       if (current(captured) && failure.name !== 'AbortError') setError(failure.message || 'Could not reach the route optimizer. Please retry.');
@@ -358,7 +382,7 @@ export default function LocationInput({ map, auth }) {
         (placeId) => resolvePlace(map, placeId, { signal: controller.signal }), complete);
       if (!current(captured)) throw abortError();
       privateOwner.current = captured.owner;
-      setViewedTrip({ trip, result: restored });
+      setViewedTrip({ trip, result: restored, linksPending: !complete });
       scrollPane.current?.scrollTo({ top: 0 });
     } finally {
       controllers.current.delete(controller);
@@ -376,6 +400,7 @@ export default function LocationInput({ map, auth }) {
     setArriveBy(restored.inputs.arrive_by || '');
     setResult(restored);
     setOpenedTrip({ id: trip.id, title: trip.title, opened: true, created_at: trip.created_at, facts: titleFacts(restored) });
+    newSession();
     setViewedTrip(null);
     setActiveView('plan');
     viewButtons.current.plan?.focus();
@@ -400,15 +425,31 @@ export default function LocationInput({ map, auth }) {
   const renamePlanned = async (target, text) => editPlanned(nameChange(target, text, resultRef.current));
   const arrivePlanned = async (value) => editPlanned(arriveByChange(value));
   // A trip opened from My trips saves a change straight away; the stops it follows from My locations keep their own names.
-  const editViewed = async (change, what) => {
-    const view = viewedTrip;
+  // Edits in an open trip go one at a time, each built on the trip as the last one left it, so none is lost.
+  const viewRef = useRef(viewedTrip);
+  viewRef.current = viewedTrip;
+  const openedRef = useRef(openedTrip);
+  openedRef.current = openedTrip;
+  const viewEdits = useRef(Promise.resolve());
+  const inTurn = (task) => {
+    const run = viewEdits.current.then(task);
+    viewEdits.current = run.catch(() => {});
+    return run;
+  };
+  const showViewed = (view) => {
+    // A trip still waiting for My locations keeps waiting through its edits.
+    const next = viewRef.current?.trip.id === view.trip.id && viewRef.current.linksPending ? { ...view, linksPending: true } : view;
+    viewRef.current = next;
+    setViewedTrip((current) => current?.trip.id === next.trip.id ? next : current);
+  };
+  const editViewed = (change, what) => inTurn(async () => {
+    const view = viewRef.current;
     if (!view) return;
     // The planner may be saving this same trip; its queue then carries the change, so neither save overwrites the other.
-    if (openedTrip?.id === view.trip.id && resultRef.current?.snapshot) {
+    if (openedRef.current?.id === view.trip.id && resultRef.current?.snapshot) {
       editPlanned(change);
-      setViewedTrip((current) => current?.trip.id === view.trip.id ? { trip: { ...current.trip,
-        snapshot: renameInSnapshot(current.trip.snapshot, change, current.result.inputs.destination.source) },
-      result: renameInResult(current.result, change) } : current);
+      showViewed({ trip: { ...view.trip, snapshot: renameInSnapshot(view.trip.snapshot, change, view.result.inputs.destination.source) },
+        result: renameInResult(view.result, change) });
       return;
     }
     const snapshot = renameInSnapshot(view.trip.snapshot, change, view.result.inputs.destination.source);
@@ -422,15 +463,15 @@ export default function LocationInput({ map, auth }) {
     } catch (_) {
       throw new Error(`The ${what} was not saved. Check your connection and try again.`);
     }
-    setViewedTrip((current) => current?.trip.id === saved.id
-      ? { trip: saved, result: renameInResult(current.result, change) } : current);
-    if (openedTrip?.id === saved.id) {
+    showViewed({ trip: saved, result: renameInResult(view.result, change) });
+    // The planner may have opened this trip while the save was under way.
+    if (openedRef.current?.id === saved.id) {
       renameInPlanner(change);
       setOpenedTrip((trip) => trip?.id === saved.id ? { ...trip, title: saved.title, facts } : trip);
     }
     // My trips lists a trip by its title and dates it by its arrive-by time, so its list goes stale.
     if (change.arriveBy !== undefined || saved.title !== view.trip.title) setListVersion((version) => version + 1);
-  };
+  });
   // Edit a copy saves a new trip with the same route first, then edits that one; the original is never touched.
   const copyAttempt = useRef(null);
   const copyViewed = async () => {
@@ -464,21 +505,23 @@ export default function LocationInput({ map, auth }) {
     if (current(captured)) editInPlanner(false, copy);
   };
   // A new name here is the person's own, so a later arrive-by date leaves it as it is.
-  const titleViewed = async (text) => {
-    const view = viewedTrip;
+  const titleViewed = (text) => inTurn(async () => {
+    const view = viewRef.current;
     if (!view) return;
     try {
       // The planner may be saving this same trip; its queue then sends the name in turn.
-      if (openedTrip?.id === view.trip.id) { await autoSave.rename(text); return; }
+      if (openedRef.current?.id === view.trip.id) { await autoSave.rename(text); return; }
       const response = await requestJSON(auth, `/saved-trips/${view.trip.id}`, { method: 'PATCH',
         body: { title: canonicalText(text, 200, 200) } });
-      const saved = readTrip(response, view.trip.id);
-      setViewedTrip((current) => current?.trip.id === saved.id ? { ...current, trip: saved } : current);
+      showViewed({ ...view, trip: readTrip(response, view.trip.id) });
       setListVersion((version) => version + 1);
     } catch (_) {
       throw new Error('The name was not saved. Check your connection and try again.');
     }
-  };
+  });
+  const relinkViewed = useCallback((view, restored) => {
+    setViewedTrip((current) => current === view ? { trip: current.trip, result: restored } : current);
+  }, []);
   const renameViewed = async (target, text) => editViewed(nameChange(target, text, viewedTrip?.result), 'name');
   const arriveViewed = async (value) => editViewed(arriveByChange(value), 'time');
   // Recalculate waits one render, so the calculation reads the trip just loaded into the planner.
@@ -549,6 +592,7 @@ export default function LocationInput({ map, auth }) {
           {auth.status === 'authenticated' && <SavedRowSync saved={saved} map={map} drivers={drivers} passengers={passengers}
             destination={destination} setDrivers={setDrivers} setPassengers={setPassengers} setDestination={setDestination}
             onMove={followSavedMove} />}
+          {auth.status === 'authenticated' && <ViewedLinksSync saved={saved} map={map} view={viewedTrip} onRelinked={relinkViewed} />}
           <div className="planner-nav" role="tablist" aria-label="Planner views">
             {[['plan', 'Plan trip'], ['trips', 'My trips'], ['locations', 'My locations']].map(([view, label]) => (
               <button key={view} type="button" role="tab" id={'planner-tab-' + view}
@@ -657,7 +701,9 @@ export default function LocationInput({ map, auth }) {
             {result.changed && <ChangedNotice result={result} busy={busy} onRecalculate={submit} />}
           </RouteResults>}
           </div>
-          <SavedTripsPanel auth={auth} activeView={activeView} openedTrip={openedTrip} onOpened={setOpenedTrip}
+          <SavedTripsPanel auth={auth} activeView={activeView} openedTrip={openedTrip}
+            // Deleting the trip the planner holds also drops its waiting saves, so it never comes back.
+            onOpened={(trip) => { if (!trip) newSession(); setOpenedTrip(trip); }}
             listVersion={listVersion} viewing={!!viewedTrip}
             onBeginLoad={beginLoad} onEndLoad={endLoad} onView={viewTrip}>
             {viewedTrip && <TripView key={viewedTrip.trip.id} view={viewedTrip} route={route} selected={selected} onSelect={selectDriver} busy={busy}

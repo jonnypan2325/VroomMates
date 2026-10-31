@@ -49,7 +49,7 @@ function StatusContent({ save, auth, act, renameError, setRenameError }) {
   return <>
     <div className="trip-status">
       {phase === 'saving' ? <span role="status">Saving…</span> : <Check />}
-      <span className="trip-status-name">Saved as <InlineEdit value={trip.title} label="Trip name" onCommit={rename} /></span>
+      <span className="trip-status-name"><span className="trip-status-label">Saved as</span> <InlineEdit value={trip.title} label="Trip name" onCommit={rename} /></span>
       {trip.opened && <button type="button" className="text-button" disabled={phase === 'saving'}
         onClick={save.saveAsNew}>Save as new trip</button>}
     </div>

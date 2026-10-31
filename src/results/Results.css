@@ -94,6 +94,8 @@
 .trip-status { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 8px; min-height: 36px; margin: 0 0 4px;
   font-size: .85rem; color: var(--ink-soft); }
 .trip-status-name { display: inline-flex; align-items: baseline; gap: 4px; min-width: 0; color: var(--ink-soft); }
+/* On touch screens the name is a full-height box; the label beside it never wraps. */
+.trip-status-label { flex: none; }
 .trip-status .inline-edit { display: inline; font-weight: 600; color: var(--ink); }
 .trip-status .text-button { margin-left: auto; }
 .trip-status .trip-status-signin { margin-left: -10px; }

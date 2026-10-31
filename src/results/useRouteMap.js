@@ -1,12 +1,16 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { MUTED_COLOR, driverColor, driverInk, driverSteps, stepPerson, stopDetail, stopName } from './routeSteps';
+import { MUTED_COLOR, driverColor, driverInk, driverSteps, routeLayers, stepPerson, stopDetail, stopName, viewedFirst } from './routeSteps';
 import { carIcon, destinationIcon, pickupIcon } from './markerIcons';
+import { ROUTE_STYLE } from './routeStyle';
 
 const IDLE = { key: null, status: 'idle', legs: [], paths: [] };
+// A directions request that takes longer than this counts as unavailable.
+const DIRECTIONS_TIMEOUT = 8000;
+const { line, casing, layers: LAYERS } = ROUTE_STYLE;
 
 function requestRoute(service, steps) {
   return new Promise((resolve) => {
-    const timer = setTimeout(() => resolve(null), 8000);
+    const timer = setTimeout(() => resolve(null), DIRECTIONS_TIMEOUT);
     try {
       service.route({
         origin: steps[0].coordinates, destination: steps[steps.length - 1].coordinates,
@@ -51,6 +55,11 @@ export default function useRouteMap(map, result, selected, attempt) {
   const geometry = result?.coordinates;
   const latestRoutes = useRef(routes);
   latestRoutes.current = routes;
+  // The drivers chosen on this route, latest first: shown all together, the latest lies on top. A new route starts afresh.
+  const recent = useRef({ id: null, order: [] });
+  if (recent.current.id !== resultId) recent.current = { id: resultId, order: [] };
+  if (selected !== null && recent.current.order[0] !== selected) recent.current.order = viewedFirst(recent.current.order, selected);
+  const order = recent.current.order;
 
   useEffect(() => {
     if (!resultId) { setDirections(IDLE); return undefined; }
@@ -89,23 +98,33 @@ export default function useRouteMap(map, result, selected, attempt) {
       pin.addListener('click', () => { popup.setContent(infoContent(step)); popup.open({ map, anchor: pin }); });
       drawn.push(pin);
     };
+    const layers = routeLayers(routes.length, order);
     routes.forEach((steps, index) => {
       const active = selected === null || selected === index;
       const color = active ? driverColor(index) : MUTED_COLOR;
       const path = current.paths[index];
       if (path) {
-        drawn.push(new maps.Polyline({ map, path, strokeColor: color, strokeOpacity: active ? 0.9 : 0.75,
-          strokeWeight: active ? 5 : 4, zIndex: active ? 20 : 10 }));
+        // Each coloured route lies on its own white edge, like Google Maps, so it reads on any tiles and where
+        // routes cross. Grey routes go without, so they stay behind the chosen one.
+        const weight = active ? line.width : line.mutedWidth;
+        const layer = selected === index ? LAYERS.chosen : layers[index];
+        if (active) {
+          drawn.push(new maps.Polyline({ map, path, strokeColor: casing.color, strokeOpacity: 1,
+            strokeWeight: weight + casing.extraWidth, zIndex: layer }));
+        }
+        drawn.push(new maps.Polyline({ map, path, strokeColor: color, strokeOpacity: active ? 1 : line.mutedOpacity,
+          strokeWeight: weight, zIndex: layer + 1 }));
       }
       steps.slice(0, -1).forEach((step) => marker(step,
-        step.kind === 'start' ? carIcon(color) : pickupIcon(color, step.number, active ? driverInk(index) : '#fff'), active ? 40 : 30));
+        step.kind === 'start' ? carIcon(color) : pickupIcon(color, step.number, active ? driverInk(index) : '#fff'),
+        active ? LAYERS.marker : LAYERS.mutedMarker));
     });
-    if (routes.length) marker(routes[0][routes[0].length - 1], destinationIcon(), 50);
+    if (routes.length) marker(routes[0][routes[0].length - 1], destinationIcon(), LAYERS.destination);
     return () => {
       drawn.forEach((item) => item.setMap(null));
       popup.close();
     };
-  }, [map, result, routes, selected, current.paths]);
+  }, [map, result, routes, selected, current.paths, order]);
 
   // Frame the selected route, or all of them, whenever the choice changes; not when directions arrive.
   useEffect(() => {
@@ -115,7 +134,7 @@ export default function useRouteMap(map, result, selected, attempt) {
     routes.forEach((steps, index) => {
       if (selected === null || selected === index) steps.forEach((step) => bounds.extend(step.coordinates));
     });
-    map.fitBounds(bounds, 56);
+    map.fitBounds(bounds, ROUTE_STYLE.framePadding);
   }, [map, geometry, selected]);
 
   return { routes, status: current.status, legs: current.legs };
