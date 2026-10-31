@@ -1,0 +1,31 @@
+import { canonicalText } from './api';
+import { validArriveBy } from './tripSnapshot';
+
+const shortPlace = (point) => point.label || point.place_name || (point.address || '').split(',')[0].trim() || 'destination';
+const titleOf = (place, day) => canonicalText(`Trip to ${place}, ${day.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}`, 200, 200);
+// An arrive-by time is the destination's wall clock, so its date is read without a time zone.
+const arriveDay = (value) => new Date(Number(value.slice(0, 4)), Number(value.slice(5, 7)) - 1, Number(value.slice(8, 10)));
+
+/** What an automatic title is made from: the destination's short name and the arrive-by time, if any. */
+export const titleFacts = (result) => ({ place: Array.from(shortPlace(result.inputs.destination)).slice(0, 80).join(''),
+  arriveBy: validArriveBy(result.inputs.arrive_by) ? result.inputs.arrive_by : '' });
+
+export const titleFromFacts = (facts, now = new Date()) => titleOf(facts.place, facts.arriveBy ? arriveDay(facts.arriveBy) : now);
+
+/** "Trip to BCD Tofu, Oct 22", dated by the arrive-by time when there is one: renamable, and within the 200-character limit. */
+export const automaticTitle = (result, now = new Date()) => titleFromFacts(titleFacts(result), now);
+
+/**
+ * The title after a change from `before` to `after`. A title that is still automatic, for the old
+ * destination on the day the trip was saved or its old arrive-by date, follows the change; one the
+ * person chose, or a copy's, stays as it is.
+ */
+export function followTitle(title, before, after, createdAt) {
+  const created = createdAt ? new Date(createdAt) : null;
+  const days = [created, before.arriveBy && arriveDay(before.arriveBy)].filter(Boolean);
+  if (!days.some((day) => titleOf(before.place, day) === title)) return title;
+  const day = after.arriveBy ? arriveDay(after.arriveBy) : created;
+  return day ? titleOf(after.place, day) : title;
+}
+
+export const copyTitle = (title) => canonicalText(Array.from('Copy of ' + title).slice(0, 200).join(''), 200, 200);
