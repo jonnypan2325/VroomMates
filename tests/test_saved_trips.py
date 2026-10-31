@@ -285,6 +285,120 @@ class SavedTripTests(unittest.TestCase):
             self.assert_error(self.call('POST', json=value), 400, 'INVALID_SNAPSHOT')
         self.assertEqual(self.store.calls, [])
 
+    def test_optional_saved_location_id_round_trips_on_any_stop(self):
+        home, office = str(uuid.uuid4()), str(uuid.uuid4())
+        value = payload()
+        inputs = value['snapshot']['inputs']
+        inputs['drivers'][0]['location_id'] = home
+        inputs['passengers'][0]['location_id'] = office
+        inputs['passengers'][1]['location_id'] = office  # One saved place may be two pickups.
+        inputs['destination']['location_id'] = home
+        response = self.call('POST', json=value)
+        self.assertEqual(response.status_code, 201)
+        saved = response.json['trip']['snapshot']['inputs']
+        self.assertEqual([row['location_id'] for row in saved['drivers'] + saved['passengers']],
+                         [home, office, office])
+        self.assertEqual(saved['destination']['location_id'], home)
+        self.assertEqual(self.call('GET', '/saved-trips/' + value['id']).json['trip'], response.json['trip'])
+        patched = payload(value['id'])
+        patched['snapshot']['inputs']['passengers'][1]['location_id'] = home
+        result = self.call('PATCH', '/saved-trips/' + value['id'], json={'snapshot': patched['snapshot']})
+        self.assertEqual(result.status_code, 200)
+        points = result.json['trip']['snapshot']['inputs']['passengers']
+        self.assertNotIn('location_id', points[0])
+        self.assertEqual(points[1]['location_id'], home)
+
+    def test_trip_without_saved_location_ids_is_unchanged(self):
+        normalized = validate_snapshot(payload()['snapshot'])
+        inputs = normalized['inputs']
+        for row in inputs['drivers'] + inputs['passengers'] + [inputs['destination']]:
+            self.assertNotIn('location_id', row)
+        value = payload()
+        value['snapshot']['inputs']['passengers'][0]['location_id'] = str(uuid.uuid4())
+        mixed = validate_snapshot(value['snapshot'])['inputs']
+        self.assertNotIn('location_id', mixed['passengers'][1])
+        self.assertNotIn('location_id', mixed['destination'])
+
+    def test_saved_location_id_must_be_a_canonical_v4_uuid(self):
+        ident = str(uuid.uuid4())
+        for bad in [None, '', 3, True, {}, [ident], ident.upper(), ident.replace('-', ''),
+                    ' ' + ident, str(uuid.uuid1()), 'x' * 36, '00000000-0000-0000-0000-000000000000']:
+            for target in ['drivers', 'passengers', 'destination']:
+                value = payload(); inputs = value['snapshot']['inputs']
+                row = inputs[target] if target == 'destination' else inputs[target][0]
+                row['location_id'] = bad
+                self.assert_error(self.call('POST', json=value), 400, 'INVALID_SNAPSHOT')
+        self.assertEqual(self.store.calls, [])
+
+    def test_saved_location_id_only_on_stops_and_other_fields_still_rejected(self):
+        ident = str(uuid.uuid4())
+        for field in ['saved_location_id', 'locationId', 'location', 'location_label']:
+            value = payload(); value['snapshot']['inputs']['passengers'][0][field] = ident
+            self.assert_error(self.call('POST', json=value), 400, 'INVALID_SNAPSHOT')
+        for target in ['snapshot', 'inputs', 'source', 'route']:
+            value = payload(); snap = value['snapshot']
+            obj = {'snapshot': snap, 'inputs': snap['inputs'],
+                   'source': snap['inputs']['passengers'][0]['source'], 'route': snap['routes'][0]}[target]
+            obj['location_id'] = ident
+            self.assert_error(self.call('POST', json=value), 400, 'INVALID_SNAPSHOT')
+        self.assertEqual(self.store.calls, [])
+
+    def test_optional_person_name_round_trips_on_drivers_and_pickups(self):
+        home = str(uuid.uuid4())
+        value = payload()
+        inputs = value['snapshot']['inputs']
+        inputs['drivers'][0].update(person='  Sam ', location_id=home)
+        inputs['passengers'][0]['person'] = 'Mia and Alex'
+        inputs['passengers'][1]['person'] = 'Zoë'  # Decomposed, stored composed.
+        response = self.call('POST', json=value)
+        self.assertEqual(response.status_code, 201)
+        saved = response.json['trip']['snapshot']['inputs']
+        self.assertEqual([row['person'] for row in saved['drivers'] + saved['passengers']],
+                         ['Sam', 'Mia and Alex', 'Zoë'])
+        self.assertEqual((saved['drivers'][0]['label'], saved['drivers'][0]['location_id']), ('Fixture driver', home))
+        self.assertNotIn('person', saved['destination'])
+        self.assertEqual(self.call('GET', '/saved-trips/' + value['id']).json['trip'], response.json['trip'])
+        renamed = copy.deepcopy(response.json['trip']['snapshot'])
+        del renamed['inputs']['passengers'][0]['person']
+        renamed['inputs']['drivers'][0]['person'] = 'Samantha'
+        result = self.call('PATCH', '/saved-trips/' + value['id'], json={'snapshot': renamed})
+        self.assertEqual(result.status_code, 200)
+        points = result.json['trip']['snapshot']['inputs']
+        self.assertEqual(points['drivers'][0]['person'], 'Samantha')
+        self.assertNotIn('person', points['passengers'][0])
+        self.assertEqual(points['passengers'][1]['person'], 'Zoë')
+        unnamed = validate_snapshot(payload()['snapshot'])['inputs']
+        for row in unnamed['drivers'] + unnamed['passengers'] + [unnamed['destination']]:
+            self.assertNotIn('person', row)
+
+    def test_person_name_is_short_non_empty_text(self):
+        self.assertEqual(self.call('POST', json=self.named('x' * 80)).status_code, 201)
+        self.assertEqual(self.call('POST', json=self.named('\U00010348' * 80)).status_code, 201)
+        for bad in [None, '', '   ', 3, True, ['Sam'], {'name': 'Sam'}, 'x' * 81,
+                    'x\x00y', 'x\ud800', '\nSam', 'Sam‎']:
+            for target in ['drivers', 'passengers']:
+                self.assert_error(self.call('POST', json=self.named(bad, target)), 400, 'INVALID_SNAPSHOT')
+
+    def test_person_name_only_on_drivers_and_pickups_and_other_fields_still_rejected(self):
+        value = payload(); value['snapshot']['inputs']['destination']['person'] = 'Sam'
+        self.assert_error(self.call('POST', json=value), 400, 'INVALID_SNAPSHOT')
+        for field in ['person_name', 'name', 'people', 'driver_name', 'nickname']:
+            value = payload(); value['snapshot']['inputs']['drivers'][0][field] = 'Sam'
+            self.assert_error(self.call('POST', json=value), 400, 'INVALID_SNAPSHOT')
+        for target in ['snapshot', 'inputs', 'source', 'route']:
+            value = payload(); snap = value['snapshot']
+            obj = {'snapshot': snap, 'inputs': snap['inputs'],
+                   'source': snap['inputs']['drivers'][0]['source'], 'route': snap['routes'][0]}[target]
+            obj['person'] = 'Sam'
+            self.assert_error(self.call('POST', json=value), 400, 'INVALID_SNAPSHOT')
+        self.assertEqual(self.store.calls, [])
+
+    @staticmethod
+    def named(person, target='passengers'):
+        value = payload()
+        value['snapshot']['inputs'][target][0]['person'] = person
+        return value
+
     def test_route_occurrence_driver_capacity_and_shape_rejections(self):
         cases = []
         for stops in [['d0', 'p0', 'dest'], ['d0', 'p0', 'p0', 'dest'], ['d0', 'p0', 'unknown', 'dest'],
