@@ -1,5 +1,5 @@
 import { DRIVER_COLORS, arrivalTimes, clockMinutes, driverInk, driverName, driverSteps, formatClock, formatDuration, formatTripClock,
-  formatTripDate, peopleText,
+  formatTripDate, peopleText, routeLayers, viewedFirst,
   seatsUsed, stepName, stepPerson, stopDetail, stopName } from './routeSteps';
 
 const point = (stop_id, place_id, extra = {}) => ({ stop_id, label: '', address: `${stop_id} Street, Irvine, CA`,
@@ -89,4 +89,16 @@ it('dates a trip by weekday and day without the year, and names the day only bef
   const sunday = new Date(2026, 10, 1).toLocaleDateString(undefined, { weekday: 'short' });
   expect(formatTripClock(-20, '2026-11-02')).toBe(`${sunday} ${formatClock(-20)}`);
   expect(formatTripClock(-20, '')).toBe(formatClock(-20));
+});
+
+it('stacks routes with the latest chosen on top, and routes never chosen below in driver order', () => {
+  expect(routeLayers(3, [])).toEqual([10, 12, 14]);
+  const blue = viewedFirst([], 0);
+  expect(routeLayers(3, blue)).toEqual([14, 10, 12]);
+  const green = viewedFirst(blue, 2);
+  expect(green).toEqual([2, 0]);
+  expect(routeLayers(3, green)).toEqual([12, 10, 14]);
+  expect(viewedFirst(green, 0)).toEqual([0, 2]);
+  // A driver beyond this route's drivers is ignored.
+  expect(routeLayers(2, [5, 1])).toEqual([10, 12]);
 });

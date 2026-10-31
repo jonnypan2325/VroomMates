@@ -3,6 +3,9 @@ import { act, fireEvent, render, screen, within } from '@testing-library/react';
 import '@testing-library/jest-dom';
 import RouteResults from './RouteResults';
 import { driverSteps, formatTripClock, formatTripDate } from './routeSteps';
+import { TextEncoder } from 'util';
+
+beforeAll(() => { global.TextEncoder = TextEncoder; });
 
 const point = (stop_id, place_id, extra = {}) => ({ stop_id, label: '', address: `${stop_id} Street, Irvine, CA`,
   coordinates: { lat: 1, lng: 1 }, source: { kind: 'google_places', place_id }, ...extra });

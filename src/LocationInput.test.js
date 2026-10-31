@@ -45,10 +45,11 @@ beforeAll(() => {
 const deferred = () => { let resolve; const promise = new Promise((yes) => { resolve = yes; }); return { promise, resolve }; };
 const STAMP = '2026-10-29T12:00:00Z';
 const reply = (status, body) => ({ ok: status >= 200 && status < 300, status, json: async () => body });
-// Saved trips in memory, answering like the API; `fail` rejects that many writes with 503.
+// Saved trips in memory, answering like the API; `fail` rejects that many writes with 503, and `hold` keeps replies back.
 function tripServer() {
-  const server = { trips: new Map(), writes: [], fail: 0 };
+  const server = { trips: new Map(), writes: [], fail: 0, hold: false, held: [] };
   server.protectedRequest = jest.fn(async (path, options = {}) => {
+    if (server.hold) await new Promise((resolve) => server.held.push(resolve));
     const method = options.method || 'GET';
     const body = options.body ? JSON.parse(options.body) : null;
     const id = path.split('?')[0].split('/')[2];
@@ -106,7 +107,12 @@ const calculate = () => fireEvent.click(calculateButton());
 // A saved choice starts an async place lookup; async act settles it before assertions.
 async function settle(fire) { await act(async () => { fire(); }); }
 const useSaved = (field) => settle(() => fireEvent.click(screen.getByRole('button', { name: `Use Home for ${field}` })));
-const saved = () => screen.findByText('Saved as', { exact: false });
+// "Saved as" can show while the save still reads "Saving…"; waiting for both keeps its last update inside the test.
+async function saved() {
+  const line = await screen.findByText('Saved as', { exact: false });
+  await waitFor(() => expect(screen.queryByText('Saving…')).not.toBeInTheDocument());
+  return line;
+}
 // After a save the status line settles on "Saved as"; waiting for it keeps later updates inside the test.
 async function settled() {
   await waitFor(() => expect(screen.queryByText('Saving…')).not.toBeInTheDocument());
@@ -126,9 +132,10 @@ async function rename(button, field, text) {
 
 test('a pickup count sends individual people, and the route saves once and stays after edits', async () => {
   show(); fillTrip(); fetch.mockResolvedValue(responseFor(3)); calculate();
-  await screen.findByRole('heading', {name:'Your route'});
-  expect(JSON.parse(fetch.mock.calls[0][1].body).passengers).toEqual(Array(3).fill({lat:4,lng:4}));
+  // One wait until the save has finished: a second await could let its reply land between the two.
   await saved();
+  expect(screen.getByRole('heading', {name:'Your route'})).toBeInTheDocument();
+  expect(JSON.parse(fetch.mock.calls[0][1].body).passengers).toEqual(Array(3).fill({lat:4,lng:4}));
   expect(server.writes).toHaveLength(1);
   const { snapshot } = server.writes[0].body;
   expect(snapshot.inputs.passengers).toHaveLength(3);
@@ -761,4 +768,135 @@ test('a copy that cannot be saved says so, stays in the trip view, and a retry n
   expect(await screen.findByText('Editing', { exact: false })).toHaveTextContent('Editing Copy of Friday dinner');
   expect(server.writes.map((write) => write.id)).toEqual([server.writes[0].id, server.writes[0].id]);
   expect(server.trips.size).toBe(2);
+});
+
+test('a save still under way at Start over never joins the next route, and Undo gets its trip back', async () => {
+  show(); fillTrip(1); fetch.mockResolvedValue(responseFor(1));
+  server.hold = true;
+  calculate();
+  await waitFor(() => expect(server.held).toHaveLength(1));
+  fireEvent.click(screen.getByRole('button', { name: 'Start over' }));
+  server.hold = false;
+  await settle(() => server.held.shift()());
+  expect(screen.queryByText('Saved as', { exact: false })).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: 'Undo' }));
+  await saved();
+  expect(screen.getByRole('button', { name: /^Trip name: Trip to Destination/ })).toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: 'Start over' }));
+  fillTrip(1); calculate();
+  await waitFor(() => expect(server.writes).toHaveLength(2));
+  await settled();
+  expect(server.writes.map((write) => write.method)).toEqual(['POST', 'POST']);
+  expect(server.trips.size).toBe(2);
+});
+
+test('two quick edits in a saved trip both reach it, the second built on the first', async () => {
+  savedTrip(); show();
+  await viewTrip();
+  server.hold = true;
+  await rename(/^Who is at pickup 1/, 'Who is at pickup 1', 'Mia');
+  await setTime('20:15');
+  await waitFor(() => expect(server.held).toHaveLength(1));
+  await settle(() => server.held.shift()());
+  await waitFor(() => expect(server.held).toHaveLength(1));
+  server.hold = false;
+  await settle(() => server.held.shift()());
+  await waitFor(() => expect(server.trips.get(TRIP_ID).snapshot.inputs.arrive_by).toBe(`${today()}T20:15`));
+  expect(server.trips.get(TRIP_ID).snapshot.inputs.passengers[0].person).toBe('Mia');
+  expect(screen.getByRole('button', { name: /^Who is at pickup 1: Mia/ })).toBeInTheDocument();
+});
+
+test('naming the destination on a route never names a different place the planner now holds', async () => {
+  show(); fillTrip(1); fetch.mockResolvedValue(responseFor(1)); calculate();
+  await saved();
+  await rename(/^Destination name/, 'Destination name', 'BCD');
+  expect(screen.getByText('Destination nickname: BCD')).toBeInTheDocument();
+  // The planner's destination becomes another place, and the route on screen is not calculated again.
+  resolvePlace.mockResolvedValue({ address: 'Home address', source: { kind: 'google_places', place_id: 'home' }, coordinates: { lat: 2, lng: 2 } });
+  await useSaved('Destination');
+  expect(screen.getByText('Destination nickname: Home')).toBeInTheDocument();
+  await rename(/^Destination name/, 'Destination name', 'Dinner spot');
+  expect(screen.getByText('Destination nickname: Home')).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: /^Destination name: Dinner spot/ })).toBeInTheDocument();
+});
+
+test('naming people a pickup shares between drivers splits its planner row, so Recalculate keeps every name', async () => {
+  show();
+  fill('Driver 1 passenger seats', '1'); fill('Driver 1 location', 'Origin');
+  fireEvent.click(screen.getByRole('button', { name: 'Add Driver' }));
+  fill('Driver 2 passenger seats', '1'); fill('Driver 2 location', 'Second');
+  fill('Pickup 1 location', 'Pickup'); fill('Passengers at pickup 1', '2'); fill('Destination', 'Destination');
+  const both = { ok: true, json: async () => ({ optimizedRoutes: [[{ lat: 1, lng: 1 }, { lat: 4, lng: 4 }, { lat: 9, lng: 9 }],
+    [{ lat: 1, lng: 1 }, { lat: 4, lng: 4 }, { lat: 9, lng: 9 }]] }) };
+  fetch.mockResolvedValue(both); calculate();
+  await saved();
+  const name = async (driver, person) => {
+    fireEvent.click(screen.getAllByRole('button', { name: /^Origin|^Second/ })[driver]);
+    await rename(/^Who is at pickup 1/, 'Who is at pickup 1', person);
+  };
+  await name(0, 'Mia');
+  await name(1, 'Alex');
+  expect(screen.getByLabelText('Passengers at pickup 1')).toHaveValue(1);
+  expect(screen.getByLabelText('Passengers at pickup 2')).toHaveValue(1);
+  await settled();
+  calculate();
+  await waitFor(() => expect(fetch).toHaveBeenCalledTimes(2));
+  // The optimizer is asked the same question as before the split.
+  expect(fetch.mock.calls[1][1].body).toBe(fetch.mock.calls[0][1].body);
+  await waitFor(() => expect(server.writes.length).toBeGreaterThanOrEqual(4));
+  await settled();
+  expect(lastWrite().body.snapshot.inputs.passengers.map((point) => point.person).sort()).toEqual(['Alex', 'Mia']);
+  fireEvent.click(screen.getByRole('button', { name: 'Start over' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Undo' }));
+  expect(screen.getByLabelText('Passengers at pickup 1')).toHaveValue(1);
+  expect(screen.getByLabelText('Passengers at pickup 2')).toHaveValue(1);
+});
+
+test('a trip opened before My locations loads checks for moved places once the list arrives', async () => {
+  savedTrip();
+  mockSaved.loading = true;
+  const view = show();
+  await viewTrip();
+  expect(screen.queryByText('Home has moved.')).not.toBeInTheDocument();
+  mockSaved.loading = false;
+  view.rerender(<LocationInput auth={auth} map={map} />);
+  expect(await screen.findByText('Home has moved.')).toBeInTheDocument();
+  expect(screen.getByText('new-home address')).toBeInTheDocument();
+  expect(server.writes).toHaveLength(0);
+});
+
+test('a route calculated in one account is never saved into the next, while one calculated signed out is', async () => {
+  const view = show(); fillTrip(1); fetch.mockResolvedValue(responseFor(1));
+  server.hold = true;
+  calculate();
+  await waitFor(() => expect(server.held).toHaveLength(1));
+  const other = tripServer();
+  const next = { status: 'authenticated', generation: 3, profile: { id: 'fixture-b' }, protectedRequest: other.protectedRequest };
+  view.rerender(<LocationInput auth={{ status: 'anonymous', generation: 2, signIn: jest.fn(), signInReady: true }} map={map} />);
+  view.rerender(<LocationInput auth={next} map={map} />);
+  await settle(() => server.held.shift()());
+  expect(other.writes).toHaveLength(0);
+  expect(screen.queryByRole('heading', { name: 'Your route' })).not.toBeInTheDocument();
+  // Signed out, a route is anyone's, so signing in saves it.
+  view.rerender(<LocationInput auth={{ status: 'anonymous', generation: 4, signIn: jest.fn(), signInReady: true }} map={map} />);
+  fillTrip(1); calculate();
+  await screen.findByRole('heading', { name: 'Your route' });
+  view.rerender(<LocationInput auth={{ ...next, generation: 5 }} map={map} />);
+  await waitFor(() => expect(other.writes).toHaveLength(1));
+  await settled();
+});
+
+test('a trip deleted elsewhere keeps the planner on screen, and Retry saves the route as a new trip', async () => {
+  show(); fillTrip(1); fetch.mockResolvedValue(responseFor(1)); calculate();
+  await saved();
+  const first = server.writes[0].id;
+  server.trips.delete(first);
+  await setTime('18:45');
+  expect(await screen.findByRole('button', { name: 'Retry' })).toBeInTheDocument();
+  expect(screen.getByText('It is not in My trips yet.')).toBeInTheDocument();
+  await settle(() => fireEvent.click(screen.getByRole('button', { name: 'Retry' })));
+  await settled();
+  expect(lastWrite()).toMatchObject({ method: 'POST' });
+  expect(lastWrite().id).not.toBe(first);
+  expect(server.trips.get(lastWrite().id).snapshot.inputs.arrive_by).toBe(`${today()}T18:45`);
 });
