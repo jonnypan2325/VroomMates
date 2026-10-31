@@ -1,11 +1,11 @@
-import React, { useId, useRef, useState } from 'react';
+import React, { useEffect, useId, useRef, useState } from 'react';
 import InlineEdit from '../saving/InlineEdit';
 import { Chevron } from '../saving/SavedLocationControls';
 import { GLYPHS } from './markerIcons';
 import { MAX_WAYPOINTS, mapsLinks, partLabel } from './mapsLinks';
 import RouteQr from './RouteQr';
-import { arrivalTimes, clockMinutes, driverColor, driverInk, driverName, formatClock, formatDuration, peopleText, seatsUsed, stepPerson,
-  stopDetail, stopName } from './routeSteps';
+import { arrivalTimes, clockMinutes, driverColor, driverInk, driverName, formatDuration, formatTripClock, formatTripDate, peopleText,
+  seatsUsed, stepPerson, stopDetail, stopName } from './routeSteps';
 import './Results.css';
 
 function StepMark({ step }) {
@@ -87,35 +87,75 @@ function StepName({ step, onRename, moved }) {
 }
 
 /** When the stop is reached, given an arrive-by time: the driver leaves, a pickup is about, the destination is the time set. */
-function StepTime({ step, minutes }) {
+function StepTime({ step, minutes, date }) {
   if (minutes === undefined) return step.kind === 'start' ? <span aria-hidden="true">Start</span> : null;
-  const clock = formatClock(minutes);
+  const clock = formatTripClock(minutes, date);
   if (step.kind === 'start') return <span className="route-step-time">Leaves {clock}</span>;
   if (step.kind === 'destination') return <span className="route-step-time">Arrives {clock}</span>;
   return <span className="route-step-time">about {clock}</span>;
 }
 
-/** Everyone arrives at the destination by one time; each driver's leaving and pickup times are worked back from it. */
-function ArriveBy({ value, onChange, status }) {
+const pad = (number) => String(number).padStart(2, '0');
+const localDate = (now) => `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+const localNow = (now = new Date()) => `${localDate(now)}T${pad(now.getHours())}:${pad(now.getMinutes())}`;
+const split = (value) => value ? { date: value.slice(0, 10), time: value.slice(11) } : { date: '', time: '' };
+// What the fields show: the saved time, or else the default date unless it was cleared.
+const shownFor = (saved, dismissed, defaultDate) => saved ? split(saved) : { date: dismissed ? '' : defaultDate, time: '' };
+
+/**
+ * Everyone arrives at the destination by one date and time; each driver's leaving and pickup times are worked
+ * back from it. A time typed without a date is for today; clearing either part clears the time. A new route starts
+ * on `defaultDate`, shown but not saved until a time is set, unless the date is cleared.
+ */
+function ArriveBy({ value, onChange, status, defaultDate = '' }) {
   const id = useId();
-  const note = !value ? 'Set a time to see when each driver leaves and reaches each pickup.'
+  const dismissed = useRef(false);
+  const [draft, setDraft] = useState(() => shownFor(value, false, defaultDate));
+  const [error, setError] = useState('');
+  // A saved or restored time replaces whatever was typed.
+  useEffect(() => { setDraft(shownFor(value, dismissed.current, defaultDate)); }, [value, defaultDate]);
+  const commit = async (next) => {
+    if (next.date !== draft.date) dismissed.current = !next.date;
+    setDraft(next);
+    const full = next.date && next.time ? `${next.date}T${next.time}` : '';
+    if (full === value) return;
+    setError('');
+    try { await onChange(full); } catch (failure) {
+      setError(failure.message || 'The time was not saved.');
+      setDraft(shownFor(value, dismissed.current, defaultDate));
+    }
+  };
+  const statusNote = !value ? 'Set a time to see when each driver leaves and reaches each pickup.'
     : status === 'ready' ? 'Estimates use Google drive times, without traffic or time spent at pickups.'
       : status === 'loading' ? 'Times appear once drive times load.' : 'Times need drive times from Google.';
-  return <div className="route-arrive">
-    <label htmlFor={id}>Arrive by</label>
-    <input id={id} type="time" value={value} onChange={(event) => onChange(event.target.value)}
-      aria-describedby={id + '-note'} />
+  const note = value && value < localNow() ? 'This time has passed.' + (status === 'ready' ? '' : ' ' + statusNote) : statusNote;
+  return <div className="route-arrive" role="group" aria-labelledby={id}>
+    <span id={id} className="route-arrive-label">Arrive by</span>
+    <span className="route-arrive-fields">
+      {/* The date reads "Fri, Oct 30"; the native picker lies over it, so a tap or click still opens it. */}
+      <span className={'route-arrive-date' + (draft.date ? '' : ' is-empty')}>
+        <span aria-hidden="true">{draft.date ? formatTripDate(draft.date) : 'Date'}</span>
+        <svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16" fill="none"><rect x="2.5" y="3.5" width="11" height="10" rx="1.5"
+          stroke="currentColor" strokeWidth="1.4" /><path d="M2.5 6.5h11M5.5 2v3M10.5 2v3" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" /></svg>
+        <input type="date" aria-label="Arrive by date" value={draft.date} min="2000-01-01" max="2100-12-31"
+          aria-describedby={id + '-note'} onChange={(event) => void commit({ ...draft, date: event.target.value })}
+          onClick={(event) => { try { event.currentTarget.showPicker?.(); } catch (_) { /* The browser opens its own picker. */ } }} />
+      </span>
+      <input type="time" aria-label="Arrive by time" value={draft.time} aria-describedby={id + '-note'}
+        onChange={(event) => void commit({ date: event.target.value && !draft.date ? localDate(new Date()) : draft.date,
+          time: event.target.value })} />
+    </span>
     <p id={id + '-note'} className="saving-note">{note}</p>
+    {error && <p className="saving-error" role="alert">{error}</p>}
   </div>;
 }
 
 /** Every driver's route as cards; the open card lists its stops in order and selects that route on the map. */
-export default function RouteResults({ result, routes, legs, status, selected, onSelect, onRetry, onRename, children }) {
+export default function RouteResults({ result, routes, legs, status, selected, onSelect, onRetry, onRename, onArriveBy, children }) {
   const baseId = useId();
   const [renameError, setRenameError] = useState('');
-  // The arrive-by time stays on screen for this route only; a new or reopened route starts without one.
-  const [arrive, setArrive] = useState({ id: result.id, value: '' });
-  const arriveBy = arrive.id === result.id ? arrive.value : '';
+  const arriveBy = result.inputs.arrive_by || '';
+  const arriveDate = arriveBy.slice(0, 10);
   const headers = useRef([]);
   const heading = useRef(null);
   const single = routes.length === 1;
@@ -148,7 +188,9 @@ export default function RouteResults({ result, routes, legs, status, selected, o
       <p>Directions are unavailable.</p>
       <button type="button" className="secondary-button" aria-label="Retry directions" onClick={retryDirections}>Retry</button>
     </div>}
-    <ArriveBy value={arriveBy} status={status} onChange={(value) => setArrive({ id: result.id, value })} />
+    {/* A route just calculated starts on today's date; one reopened keeps what it saved. */}
+    {onArriveBy && <ArriveBy key={result.id} value={arriveBy} status={status} onChange={onArriveBy}
+      defaultDate={result.origin === 'calculated' ? localDate(new Date()) : ''} />}
     {!single && <div className="route-overview-row">
       <p className="saving-note">{selected === null ? 'All drivers are on the map. Choose a driver to see their stops.' : ''}</p>
       {selected !== null && <button type="button" className="text-button" onClick={showAll}>Show all drivers</button>}
@@ -159,7 +201,7 @@ export default function RouteResults({ result, routes, legs, status, selected, o
         const driver = result.inputs.drivers[index];
         const times = legs[index];
         const total = times && times.every(Number.isFinite) ? times.reduce((sum, value) => sum + value, 0) : null;
-        const clock = arrivalTimes(clockMinutes(arriveBy), times);
+        const clock = arrivalTimes(clockMinutes(arriveBy.slice(11)), times);
         const name = driverName(result, index);
         const place = stopName(driver);
         const panel = `${baseId}-driver-${index}`;
@@ -168,7 +210,7 @@ export default function RouteResults({ result, routes, legs, status, selected, o
           <span className="driver-card-title">
             <span className="driver-card-name">{name}{driver.person && <span className="driver-card-from"> from {place}</span>}</span>
             <span className="driver-card-meta">{seatsUsed(result, index)} of {driver.capacity} seats
-              {clock ? <> · leaves {formatClock(clock[0])}</> : total !== null && <> · {formatDuration(total)} drive</>}</span>
+              {clock ? <> · leaves {formatTripClock(clock[0], arriveDate)}</> : total !== null && <> · {formatDuration(total)} drive</>}</span>
           </span>
         </>;
         return <li key={driver.stop_id} className={'driver-card' + (expanded ? ' is-open' : '') + (open !== null && !expanded ? ' is-muted' : '')}
@@ -192,7 +234,7 @@ export default function RouteResults({ result, routes, legs, status, selected, o
                   </span>
                   <span className="route-step-meta">
                     {step.kind === 'pickup' && <span>{peopleText(step.people)}</span>}
-                    <StepTime step={step} minutes={clock ? clock[position] : undefined} />
+                    <StepTime step={step} minutes={clock ? clock[position] : undefined} date={arriveDate} />
                   </span>
                 </li>;
               })}

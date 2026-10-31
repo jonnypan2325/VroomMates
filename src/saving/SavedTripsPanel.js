@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { SavedApiError, canonicalText, requestJSON, sameData } from './api';
 import InlineEdit from './InlineEdit';
+import { validArriveBy } from './tripSnapshot';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const STOP_ID = /^[A-Za-z0-9_-]{1,64}$/;
@@ -17,7 +18,8 @@ function fields(value, required, optional = []) {
 export function canonicalSnapshot(value) {
   fields(value, ['schema_version', 'inputs', 'routes']);
   if (value.schema_version !== 1) throw new Error('Unsupported saved trip.');
-  fields(value.inputs, ['drivers', 'passengers', 'destination']);
+  fields(value.inputs, ['drivers', 'passengers', 'destination'], ['arrive_by']);
+  if (value.inputs.arrive_by !== undefined && !validArriveBy(value.inputs.arrive_by)) throw new Error('Invalid arrive-by time.');
   // Drivers and pickups may name a person; a destination is only a place.
   const point = (row, driver = false, person = true) => {
     fields(row, driver ? ['stop_id', 'source', 'capacity'] : ['stop_id', 'source'],
@@ -68,7 +70,8 @@ export function canonicalSnapshot(value) {
     return { driver_id: row.driver_id, stop_ids: [...row.stop_ids] };
   });
   if (seen.size !== passengers.length) throw new Error('Missing saved pickup.');
-  return { schema_version: 1, inputs: { drivers, passengers, destination }, routes };
+  const arrive = value.inputs.arrive_by === undefined ? {} : { arrive_by: value.inputs.arrive_by };
+  return { schema_version: 1, inputs: { drivers, passengers, destination, ...arrive }, routes };
 }
 
 function validStamp(value) {
@@ -93,7 +96,8 @@ function readList(body) {
         && /^[A-Za-z0-9_-]{1,512}$/.test(body.next_cursor)))) throw new Error('Invalid saved trips response.');
   const ids = new Set();
   return { trips: body.trips.map((trip) => {
-    fields(trip, ['id', 'title', 'created_at', 'schema_version', 'driver_count', 'passenger_count']);
+    fields(trip, ['id', 'title', 'created_at', 'schema_version', 'driver_count', 'passenger_count'], ['arrive_by']);
+    if (trip.arrive_by !== undefined && !validArriveBy(trip.arrive_by)) throw new Error('Invalid saved trip summary.');
     if (typeof trip.id !== 'string' || !UUID.test(trip.id) || ids.has(trip.id) || !validStamp(trip.created_at)
         || trip.schema_version !== 1 || !Number.isInteger(trip.driver_count) || trip.driver_count < 1 || trip.driver_count > 64
         || !Number.isInteger(trip.passenger_count) || trip.passenger_count < 1 || trip.passenger_count > 256
@@ -111,6 +115,13 @@ function failureMessage(error, fallback) {
     if (error.status === 503) return 'Saved trips are temporarily unavailable. Please retry.';
   }
   return fallback;
+}
+
+// A saved trip is dated by when everyone arrives, in full ("arrive Oct 30, 2026"), or else by when it was saved.
+function tripDate(trip) {
+  if (!trip.arrive_by) return new Date(trip.created_at).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+  const [year, month, day] = trip.arrive_by.slice(0, 10).split('-').map(Number);
+  return 'arrive ' + new Date(year, month - 1, day).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
 }
 
 const emptyList = (scope) => ({ scope, trips: [], cursor: null, loaded: false, loading: false, error: '' });
@@ -330,7 +341,7 @@ export default function SavedTripsPanel({ auth, onView, onBeginLoad, onEndLoad, 
                 <div className="location-item-text">
                   <InlineEdit value={trip.title} label={`Name of trip ${trip.title}`} className="inline-edit-title"
                     onCommit={(next) => renameTrip(trip, next)} />
-                  <span className="location-item-address">{trip.driver_count} {trip.driver_count === 1 ? 'driver' : 'drivers'} · {trip.passenger_count} {trip.passenger_count === 1 ? 'passenger' : 'passengers'} · {new Date(trip.created_at).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}</span>
+                  <span className="location-item-address">{trip.driver_count} {trip.driver_count === 1 ? 'driver' : 'drivers'} · {trip.passenger_count} {trip.passenger_count === 1 ? 'passenger' : 'passengers'} · {tripDate(trip)}</span>
                 </div>
                 {deleteId !== trip.id && <div className="location-item-actions">
                   <button type="button" className="text-button" disabled={!!activeAction}

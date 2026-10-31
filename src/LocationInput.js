@@ -9,7 +9,7 @@ import RouteResults from './results/RouteResults';
 import useRouteMap from './results/useRouteMap';
 import { SavedLocationControls, SavedLocationsPanel } from './saving/SavedLocationControls';
 import { freezeInputs, makeResult, newDriver, newPoint, newPassengerPickup, resizePickup, expandPassengerPickups, groupPassengerPickups, reopenSnapshot,
-  nameChange, renameDestination, renameInResult, renameInSnapshot, renamePoints } from './saving/tripSnapshot';
+  arriveByChange, nameChange, renameDestination, renameInResult, renameInSnapshot, renamePoints } from './saving/tripSnapshot';
 import { hasCoordinates, resolvePlace } from './saving/places';
 import './saving/Saving.css';
 
@@ -94,7 +94,7 @@ function ChangedNotice({ result, onRecalculate, busy }) {
   </div>;
 }
 
-function TripView({ view, route, selected, onSelect, onRetry, onBack, onEdit, onRename, busy, saveStatus }) {
+function TripView({ view, route, selected, onSelect, onRetry, onBack, onEdit, onRename, onArriveBy, busy, saveStatus }) {
   const { trip, result } = view;
   const drivers = result.inputs.drivers.length;
   const people = result.inputs.passengers.length;
@@ -106,7 +106,7 @@ function TripView({ view, route, selected, onSelect, onRetry, onBack, onEdit, on
     <p className="saving-note trip-view-meta">{drivers} {drivers === 1 ? 'driver' : 'drivers'} · {people} {people === 1 ? 'passenger' : 'passengers'} · saved {new Date(trip.created_at).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}</p>
     {result.changed && <ChangedNotice result={result} busy={busy} onRecalculate={() => onEdit(true)} />}
     <RouteResults result={result} routes={route.routes} legs={route.legs} status={route.status}
-      selected={selected} onSelect={onSelect} onRetry={onRetry} onRename={onRename}>{saveStatus}</RouteResults>
+      selected={selected} onSelect={onSelect} onRetry={onRetry} onRename={onRename} onArriveBy={onArriveBy}>{saveStatus}</RouteResults>
     <button type="button" className="secondary-button trip-view-edit" disabled={busy} onClick={() => onEdit(false)}>Edit in planner</button>
   </div>;
 }
@@ -115,6 +115,8 @@ export default function LocationInput({ map, auth }) {
   const [drivers, setDrivers] = useState(() => [newDriver()]);
   const [passengers, setPassengers] = useState(() => [newPassengerPickup()]);
   const [destination, setDestination] = useState(newPoint);
+  // When everyone should reach the destination, as "2026-11-01T18:30"; kept with the stops, so Recalculate keeps it.
+  const [arriveBy, setArriveBy] = useState('');
   const [result, setResult] = useState(null);
   // The chosen driver belongs to one result; any other result opens as the all-drivers overview.
   const [selection, setSelection] = useState({ id: null, index: null });
@@ -187,6 +189,7 @@ export default function LocationInput({ map, auth }) {
         setDrivers([newDriver()]);
         setPassengers([newPassengerPickup()]);
         setDestination(newPoint());
+        setArriveBy('');
         setResult(null);
       }
     }
@@ -223,12 +226,13 @@ export default function LocationInput({ map, auth }) {
 
   // Clears the planner (and any opened trip) but never saved trips or locations; Undo restores it.
   const startOver = () => {
-    const before = { drivers, passengers, destination, result, openedTrip };
+    const before = { drivers, passengers, destination, arriveBy, result, openedTrip };
     invalidate(); setError('');
     setOpenedTrip(null);
     setDrivers([newDriver()]);
     setPassengers([newPassengerPickup()]);
     setDestination(newPoint());
+    setArriveBy('');
     setResult(null);
     setCleared(before);
     scrollPane.current?.scrollTo({ top: 0 });
@@ -239,6 +243,7 @@ export default function LocationInput({ map, auth }) {
     setDrivers(cleared.drivers);
     setPassengers(cleared.passengers);
     setDestination(cleared.destination);
+    setArriveBy(cleared.arriveBy);
     setResult(cleared.result);
     setOpenedTrip(cleared.openedTrip);
   };
@@ -267,7 +272,7 @@ export default function LocationInput({ map, auth }) {
     let expanded;
     try { expanded = expandPassengerPickups(passengers); }
     catch (failure) { setError(failure.message); return; }
-    const inputs = freezeInputs(drivers, expanded, destination);
+    const inputs = { ...freezeInputs(drivers, expanded, destination), ...(arriveBy ? { arrive_by: arriveBy } : {}) };
     if (![...inputs.drivers, ...inputs.passengers, inputs.destination].every((point) => hasCoordinates(point.coordinates)) ||
         inputs.drivers.some((point) => !Number.isSafeInteger(point.capacity) || point.capacity < 1)) {
       setError('Choose a Google suggestion for every location and enter a positive seat count.');
@@ -346,6 +351,7 @@ export default function LocationInput({ map, auth }) {
     setDrivers(restored.inputs.drivers);
     setPassengers(groupPassengerPickups(restored.inputs.passengers));
     setDestination(restored.inputs.destination);
+    setArriveBy(restored.inputs.arrive_by || '');
     setResult(restored);
     setOpenedTrip({ id: trip.id, title: trip.title, opened: true });
     setViewedTrip(null);
@@ -353,29 +359,31 @@ export default function LocationInput({ map, auth }) {
     viewButtons.current.plan?.focus();
     if (recalculate) setCalculateNext(true);
   };
-  // A name belongs to this trip: the planner rows keep it for the next calculation, and the route stays as drawn.
+  // Names and the arrive-by time belong to this trip: the planner keeps them for the next calculation,
+  // and the route stays as drawn.
   const renameInPlanner = (change) => {
     setDrivers((list) => renamePoints(list, change));
     setPassengers((list) => renamePoints(list, change));
     setDestination((point) => renameDestination(point, change));
+    if (change.arriveBy !== undefined) setArriveBy(change.arriveBy);
     if (!resultRef.current) return null;
     const next = renameInResult(resultRef.current, change);
     setResult(next);
     return next;
   };
-  const renamePlanned = async (target, text) => {
-    const next = renameInPlanner(nameChange(target, text, resultRef.current));
-    if (next) autoSave.saveNames(next);
+  const editPlanned = (change) => {
+    const next = renameInPlanner(change);
+    if (next) autoSave.saveEdits(next);
   };
-  // A trip opened from My trips saves a new name straight away; the stops it follows from My locations keep their own names.
-  const renameViewed = async (target, text) => {
+  const renamePlanned = async (target, text) => editPlanned(nameChange(target, text, resultRef.current));
+  const arrivePlanned = async (value) => editPlanned(arriveByChange(value));
+  // A trip opened from My trips saves a change straight away; the stops it follows from My locations keep their own names.
+  const editViewed = async (change, what) => {
     const view = viewedTrip;
     if (!view) return;
-    const change = nameChange(target, text, view.result);
-    // The planner may be saving this same trip; its queue then carries the name, so neither save overwrites the other.
+    // The planner may be saving this same trip; its queue then carries the change, so neither save overwrites the other.
     if (openedTrip?.id === view.trip.id && resultRef.current?.snapshot) {
-      const next = renameInPlanner(change);
-      if (next) autoSave.saveNames(next);
+      editPlanned(change);
       setViewedTrip((current) => current?.trip.id === view.trip.id ? { trip: { ...current.trip,
         snapshot: renameInSnapshot(current.trip.snapshot, change, current.result.inputs.destination.source) },
       result: renameInResult(current.result, change) } : current);
@@ -388,12 +396,16 @@ export default function LocationInput({ map, auth }) {
         body: { snapshot: canonicalSnapshot(snapshot) } });
       saved = readTrip(response, view.trip.id);
     } catch (_) {
-      throw new Error('The name was not saved. Check your connection and try again.');
+      throw new Error(`The ${what} was not saved. Check your connection and try again.`);
     }
     setViewedTrip((current) => current?.trip.id === saved.id
       ? { trip: saved, result: renameInResult(current.result, change) } : current);
     if (openedTrip?.id === saved.id) renameInPlanner(change);
+    // My trips dates a trip by its arrive-by time, so its list goes stale.
+    if (change.arriveBy !== undefined) setListVersion((version) => version + 1);
   };
+  const renameViewed = async (target, text) => editViewed(nameChange(target, text, viewedTrip?.result), 'name');
+  const arriveViewed = async (value) => editViewed(arriveByChange(value), 'time');
   // Recalculate waits one render, so the calculation reads the trip just loaded into the planner.
   useEffect(() => {
     if (!calculateNext) return;
@@ -565,7 +577,7 @@ export default function LocationInput({ map, auth }) {
 
           {result && mapResult === result && <RouteResults result={result} routes={route.routes} legs={route.legs}
             status={route.status} selected={selected} onSelect={selectDriver} onRetry={() => setMapAttempt((attempt) => attempt + 1)}
-            onRename={renamePlanned}>
+            onRename={renamePlanned} onArriveBy={arrivePlanned}>
             <TripSaveStatus save={autoSave} auth={auth} />
             {result.changed && <ChangedNotice result={result} busy={busy} onRecalculate={submit} />}
           </RouteResults>}
@@ -575,7 +587,7 @@ export default function LocationInput({ map, auth }) {
             onBeginLoad={beginLoad} onEndLoad={endLoad} onView={viewTrip}>
             {viewedTrip && <TripView view={viewedTrip} route={route} selected={selected} onSelect={selectDriver} busy={busy}
               onRetry={() => setMapAttempt((attempt) => attempt + 1)} onBack={() => setViewedTrip(null)} onEdit={editInPlanner}
-              onRename={renameViewed}
+              onRename={renameViewed} onArriveBy={arriveViewed}
               // This trip is also in the planner, whose queue saves its names: a failed save shows here too, with Retry.
               saveStatus={openedTrip?.id === viewedTrip.trip.id && autoSave.phase === 'error'
                 ? <TripSaveStatus save={autoSave} auth={auth} /> : null} />}

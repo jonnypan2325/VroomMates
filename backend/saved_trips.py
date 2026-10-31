@@ -1,4 +1,5 @@
 """Private immutable trip references; provider geometry stays outside persistence."""
+from datetime import datetime
 import re
 
 from flask import g, request
@@ -13,6 +14,7 @@ MAX_BODY_BYTES = 65536
 MAX_DRIVERS = 64
 MAX_PASSENGERS = 256
 _STOP_ID = re.compile(r"[A-Za-z0-9_-]{1,64}")
+_ARRIVE_BY = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}")
 
 
 class UnsupportedSnapshotVersion(ValueError):
@@ -26,6 +28,16 @@ def _fields(value, required, optional=()):
 
 def _stop_id(value):
     if not isinstance(value, str) or not _STOP_ID.fullmatch(value):
+        raise ValueError()
+    return value
+
+
+def _arrive_by(value):
+    """Wall-clock time at the destination, with no zone, so every device shows the same digits."""
+    if not isinstance(value, str) or not _ARRIVE_BY.fullmatch(value):
+        raise ValueError()
+    moment = datetime.strptime(value, '%Y-%m-%dT%H:%M')
+    if moment.strftime('%Y-%m-%dT%H:%M') != value or not 2000 <= moment.year <= 2100:
         raise ValueError()
     return value
 
@@ -58,7 +70,7 @@ def validate_snapshot(value):
     if value['schema_version'] != 1:
         raise UnsupportedSnapshotVersion()
     inputs = value['inputs']
-    _fields(inputs, {'drivers', 'passengers', 'destination'})
+    _fields(inputs, {'drivers', 'passengers', 'destination'}, {'arrive_by'})
     drivers, passengers = inputs['drivers'], inputs['passengers']
     if (not isinstance(drivers, list) or not 1 <= len(drivers) <= MAX_DRIVERS
             or not isinstance(passengers, list) or not 1 <= len(passengers) <= MAX_PASSENGERS):
@@ -92,9 +104,10 @@ def validate_snapshot(value):
         normalized_routes.append({'driver_id': driver_id, 'stop_ids': stops})
     if seen != passenger_ids:
         raise ValueError()
-    return {'schema_version': 1,
-            'inputs': {'drivers': drivers, 'passengers': passengers, 'destination': destination},
-            'routes': normalized_routes}
+    normalized_inputs = {'drivers': drivers, 'passengers': passengers, 'destination': destination}
+    if 'arrive_by' in inputs:
+        normalized_inputs['arrive_by'] = _arrive_by(inputs['arrive_by'])
+    return {'schema_version': 1, 'inputs': normalized_inputs, 'routes': normalized_routes}
 
 
 def _create_record(value):
@@ -120,8 +133,10 @@ def _public_record(value, expected_id=None):
 
 def _summary(value):
     try:
-        _fields(value, {'id', 'title', 'created_at', 'schema_version', 'driver_count', 'passenger_count'})
+        _fields(value, {'id', 'title', 'created_at', 'schema_version', 'driver_count', 'passenger_count'}, {'arrive_by'})
         ident = canonical_uuid(value['id'])
+        if 'arrive_by' in value:
+            _arrive_by(value['arrive_by'])
         title = text(value['title'], 200, 200)
         encode_trip_cursor((value['created_at'], ident))
         if (title != value['title'] or type(value['schema_version']) is not int or value['schema_version'] != 1

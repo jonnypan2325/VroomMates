@@ -2,6 +2,17 @@ import { canonicalText, newId } from './api';
 import { hasCoordinates, hasPlaceSource } from './places';
 
 const LOCATION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const ARRIVE_BY = /^([0-9]{4})-([0-9]{2})-([0-9]{2})T([0-9]{2}):([0-9]{2})$/;
+
+/** Wall-clock date and time at the destination, as "2026-11-01T18:30": a real date from 2000 to 2100. */
+export function validArriveBy(value) {
+  const match = typeof value === 'string' && ARRIVE_BY.exec(value);
+  if (!match) return false;
+  const [year, month, day, hour, minute] = match.slice(1).map(Number);
+  const date = new Date(year, month - 1, day);
+  return year >= 2000 && year <= 2100 && date.getFullYear() === year && date.getMonth() === month - 1
+    && date.getDate() === day && hour < 24 && minute < 60;
+}
 
 export const newPoint = () => ({
   stop_id: newId(), address: '', label: '', coordinates: { lat: null, lng: null }, source: null,
@@ -98,6 +109,7 @@ export function makeResult(inputs, routes) {
       drivers: inputs.drivers.map((point) => reference(point, true)),
       passengers: inputs.passengers.map((point) => reference(point)),
       destination: reference(inputs.destination, false, false),
+      ...(validArriveBy(inputs.arrive_by) ? { arrive_by: inputs.arrive_by } : {}),
     }, routes: assignments };
   } catch (error) { saveError = error.message; }
   return { id: newId(), origin: 'calculated', inputs, assignments: assignments.map((route) => route.stop_ids),
@@ -150,6 +162,7 @@ export async function reopenSnapshot(snapshot, lookup, locations = null) {
     drivers: snapshot.inputs.drivers.map((point) => hydrated.get(point.stop_id)),
     passengers: snapshot.inputs.passengers.map((point) => hydrated.get(point.stop_id)),
     destination: hydrated.get(snapshot.inputs.destination.stop_id),
+    ...(snapshot.inputs.arrive_by ? { arrive_by: snapshot.inputs.arrive_by } : {}),
   };
   if (snapshot.routes.length !== inputs.drivers.length) throw new Error('This saved route assignment is incomplete.');
   const passengerIds = new Set(inputs.passengers.map((point) => point.stop_id));
@@ -178,7 +191,12 @@ export async function reopenSnapshot(snapshot, lookup, locations = null) {
     coordinates: routes, snapshot: JSON.parse(JSON.stringify(snapshot)), saveError: '', changed: moved.length > 0, moved };
 }
 
-// Naming who drives or rides, or what this trip calls its destination, never moves a stop.
+// Naming who drives or rides, what this trip calls its destination, or when everyone arrives, never moves a stop.
+const withArriveBy = (inputs, change) => {
+  if (change.arriveBy === undefined) return inputs;
+  const { arrive_by: previous, ...rest } = inputs;
+  return change.arriveBy ? { ...rest, arrive_by: change.arriveBy } : rest;
+};
 const withPerson = (point, person) => {
   const { person: previous, ...rest } = point;
   return person ? { ...rest, person } : rest;
@@ -205,16 +223,22 @@ export function renameInSnapshot(snapshot, change, place) {
     // The place shown when renaming, which a reopened trip may have refreshed from the saved location.
     renamed = { ...rest, label: change.destination, source: { kind: 'google_places', place_id: place.place_id } };
   }
-  return { ...snapshot, inputs: { drivers: renamePoints(drivers, change), passengers: renamePoints(passengers, change),
-    destination: renamed } };
+  return { ...snapshot, inputs: withArriveBy({ ...snapshot.inputs, drivers: renamePoints(drivers, change),
+    passengers: renamePoints(passengers, change), destination: renamed }, change) };
 }
 
 /** The same route under new names: assignments and coordinates are kept, so the map draws it without asking again. */
 export function renameInResult(result, change) {
   const { drivers, passengers, destination } = result.inputs;
-  return { ...result, inputs: { drivers: renamePoints(drivers, change), passengers: renamePoints(passengers, change),
-    destination: renameDestination(destination, change) },
+  return { ...result, inputs: withArriveBy({ ...result.inputs, drivers: renamePoints(drivers, change),
+    passengers: renamePoints(passengers, change), destination: renameDestination(destination, change) }, change),
   snapshot: result.snapshot && renameInSnapshot(result.snapshot, change, destination.source) };
+}
+
+/** A new arrive-by time as stored; empty clears it. */
+export function arriveByChange(value) {
+  if (value && !validArriveBy(value)) throw new Error('Choose a date and time between 2000 and 2100.');
+  return { arriveBy: value || '' };
 }
 
 /** A typed name as stored: trimmed and composed; empty clears it. */

@@ -163,8 +163,8 @@ export default function useTripAutoSave({ auth, result, trip, onTrip, onChanged 
     enqueue({ resultId: result.id, snapshot: result.snapshot });
   }, [result, enqueue]);
 
-  // New names for people or the destination update the trip saved for this route, or the save still under way.
-  const saveNames = useCallback((next) => {
+  // New names, or a new arrive-by time, update the trip saved for this route, or the save still under way.
+  const saveEdits = useCallback((next) => {
     const lane = queue.current;
     if (!scope || !next?.snapshot) return;
     // A trip reopened into the planner has no automatic title yet; a save that must create it needs one.
@@ -193,5 +193,5 @@ export default function useTripAutoSave({ auth, result, trip, onTrip, onChanged 
   else if (result) phase = 'unsaved';
   // A saved trip deleted from My trips leaves its route here, unsaved.
   if (phase === 'saved' && !trip) phase = 'unsaved';
-  return { phase, message: active?.message || '', trip, retry, rename, saveAsNew, saveAgain, saveNames };
+  return { phase, message: active?.message || '', trip, retry, rename, saveAsNew, saveAgain, saveEdits };
 }

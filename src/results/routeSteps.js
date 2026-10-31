@@ -82,6 +82,21 @@ export function formatClock(minutes) {
   return time.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
 }
 
+/** The arrive-by date during a trip: weekday, month and day, without the year, as "Fri, Oct 30". */
+export function formatTripDate(date) {
+  const [year, month, day] = date.split('-').map(Number);
+  return new Date(year, month - 1, day).toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' });
+}
+
+/** A clock time on the arrive-by date; one that falls on an earlier day says which, as "Thu 11:50 PM". */
+export function formatTripClock(minutes, date) {
+  const days = Math.floor(minutes / (24 * 60));
+  if (!days || !date) return formatClock(minutes);
+  const [year, month, day] = date.split('-').map(Number);
+  const weekday = new Date(year, month - 1, day + days).toLocaleDateString(undefined, { weekday: 'short' });
+  return `${weekday} ${formatClock(minutes)}`;
+}
+
 /**
  * Working back from the time everyone should arrive: when each stop is reached, in minutes after
  * midnight, rounded down so the estimate is never late. Null when a drive time is missing.
