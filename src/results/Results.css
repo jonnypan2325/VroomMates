@@ -120,6 +120,10 @@ input.trip-view-title { width: 100%; }
 .saving-card .trip-view-actions .secondary-button { flex: 1 1 12rem; min-height: 44px; margin: 0; }
 .saving-card .trip-view-actions .text-button { min-height: 44px; margin: 0; padding: 0 14px; }
 .trip-notice.route-map-error { margin: 10px 0; }
+.trip-unsaved { margin-top: 18px; }
+.trip-unsaved:focus { outline: 2px solid var(--accent-dark); outline-offset: 2px; }
+.trip-unsaved-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.saving-card .trip-notice .trip-unsaved-actions button { min-height: 44px; margin: 0; padding: 0 14px; }
 
 /* The map's own popup for a tapped marker. */
 .route-info { display: flex; flex-direction: column; gap: 2px; max-width: 240px; font-family: 'Poppins', sans-serif; }

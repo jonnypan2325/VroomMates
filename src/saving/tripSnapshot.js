@@ -246,6 +246,14 @@ export function renameInSnapshot(snapshot, change, place) {
     passengers: renamePoints(passengers, change), destination: renamed }, change) };
 }
 
+/** Whether a change still means something for this route: its stops are all there, and its destination is the place it named. */
+export function changeApplies(snapshot, change) {
+  const { drivers, passengers, destination } = snapshot.inputs;
+  if (change.destination !== undefined && change.place && destination.source?.place_id !== change.place) return false;
+  const stops = new Set([...drivers, ...passengers].map((point) => point.stop_id));
+  return !change.stopIds || change.stopIds.every((id) => stops.has(id));
+}
+
 /** The same route under new names: assignments and coordinates are kept, so the map draws it without asking again. */
 export function renameInResult(result, change) {
   const { drivers, passengers, destination } = result.inputs;

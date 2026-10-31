@@ -301,13 +301,17 @@ export default function SavedTripsPanel({ auth, writer, onView, onBeginLoad, onE
     setActionError(''); setActionSuccess('');
     listSequence.current += 1;
     try {
-      const response = await requestJSON(auth, `/saved-trips/${id}`, { method: 'DELETE', signal: request.controller.signal });
+      const send = async () => {
+        // A trip already gone is what was asked for: a second press after a lost reply ends here.
+        const response = await requestJSON(auth, `/saved-trips/${id}`, { method: 'DELETE', signal: request.controller.signal })
+          .catch((error) => { if (error instanceof SavedApiError && error.status === 404) return null; throw error; });
+        if (response !== null) throw new Error('Invalid delete response.');
+      };
+      // Changes still waiting for the trip are let go, and the planner stops updating it.
+      await (writer ? writer.remove(id, send) : send());
       if (!isCurrent(request)) return;
-      if (response !== null) throw new Error('Invalid delete response.');
       setList((old) => ({ ...old, trips: old.trips.filter((trip) => trip.id !== id), loading: false }));
       setDeleteId(null); setActionSuccess('Trip deleted.');
-      // Changes still waiting for the trip are let go, and the planner stops updating it.
-      writer?.forget(id);
       if (openedRef.current?.id === id) onOpened?.(null);
       returnFocus.current = true;
     } catch (error) {

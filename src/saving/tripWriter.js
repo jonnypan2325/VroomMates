@@ -68,6 +68,7 @@ export default function createTripWriter(getAuth) {
     written.add(trip.id);
     return confirm(trip, sent?.title === trip.title ? sent.facts : undefined);
   };
+  const gone = (id) => { trips.delete(id); facts.delete(id); uncertain.delete(id); unconfirmed.delete(id); written.delete(id); };
   const queueFor = (id) => {
     if (!queues.has(id)) queues.set(id, { running: false, jobs: [], idle: [] });
     return queues.get(id);
@@ -75,16 +76,23 @@ export default function createTripWriter(getAuth) {
 
   async function createTrip(job) {
     const { body } = job;
-    let response;
-    if (job.reconcile) {
-      // An unclear earlier reply may still have saved it; the same ID finds it, if it has the same content.
-      try { response = await requestJSON(getAuth(), `/saved-trips/${body.id}`); } catch (error) {
-        if (!(error instanceof SavedApiError && error.status === 404)) throw error;
+    // An ID is random, so a trip found under it is this one, saved by an earlier try: what the server has stands.
+    const find = async () => {
+      try { return readTrip(await requestJSON(getAuth(), `/saved-trips/${body.id}`), body.id); } catch (error) {
+        if (error instanceof SavedApiError && error.status === 404) return null;
+        throw error;
       }
-    }
+    };
+    const earlier = job.reconcile ? await find() : null;
+    if (earlier) return earlier;
     // A trip deleted, or an account left, while it was being checked for is not saved again.
     if (closed || forgotten.has(body.id)) throw new TripWriteError('dropped');
-    if (!response) response = await requestJSON(getAuth(), '/saved-trips', { method: 'POST', body });
+    let response;
+    try { response = await requestJSON(getAuth(), '/saved-trips', { method: 'POST', body }); } catch (error) {
+      const taken = error instanceof SavedApiError && error.status === 409 ? await find() : null;
+      if (taken) return taken;
+      throw error;
+    }
     const saved = readTrip(response, body.id);
     if (saved.title !== body.title || !sameData(saved.snapshot, body.snapshot)) {
       throw new SavedApiError(409, 'TRIP_CONFLICT', 'The saved trip has different content.');
@@ -137,13 +145,24 @@ export default function createTripWriter(getAuth) {
       const job = queue.jobs.shift();
       job.started = true;
       const create = job.kind === 'create';
+      // A delete takes its turn, so nothing already on its way can land after it and bring the trip back.
+      if (job.kind === 'delete') {
+        try {
+          await job.send();
+          forget(id);
+          job.resolve();
+        } catch (error) { job.reject(error); }
+        continue;
+      }
       // A read after a lost reply brings the trip as remembered up to date; it ends quietly either way.
       if (job.kind === 'read') {
+        // A closed writer asks nothing more of the old account's session.
+        if (closed) { job.resolve(); continue; }
         try {
           const read = readTrip(await requestJSON(getAuth(), `/saved-trips/${id}`), id);
           if (!closed && !forgotten.has(id)) settle(read);
         } catch (error) {
-          if (error instanceof SavedApiError && error.status === 404 && !closed) { uncertain.delete(id); trips.delete(id); facts.delete(id); notify(); }
+          if (error instanceof SavedApiError && error.status === 404 && !closed) { gone(id); notify(); }
         }
         job.resolve();
         continue;
@@ -152,7 +171,8 @@ export default function createTripWriter(getAuth) {
         const saved = create ? await createTrip(job) : await updateTrip(job);
         if (closed || forgotten.has(id)) throw new TripWriteError('dropped');
         if (create) failedCreates.delete(id);
-        const made = create ? job.facts : job.made;
+        // Facts belong to the title they made, which an adopted trip may no longer have.
+        const made = create ? (saved.title === job.body.title ? job.facts : undefined) : job.made;
         written.add(id);
         job.resolve(confirm(saved, made));
       } catch (error) {
@@ -163,7 +183,7 @@ export default function createTripWriter(getAuth) {
         const kind = kindOf(error, create);
         // A trip already read exists, whatever this attempt to save it says.
         if (create && kind !== 'conflict' && !trips.has(id)) failedCreates.add(id);
-        if (kind === 'detached') { trips.delete(id); facts.delete(id); notify(); }
+        if (kind === 'detached') { gone(id); notify(); }
         // A reply lost on its way may hide a write the server made, so the trip is read again: now, and
         // before the next write if that read fails too.
         if (kind === 'failed' && !create) {
@@ -181,6 +201,16 @@ export default function createTripWriter(getAuth) {
     queues.delete(id);
     queue.idle.splice(0).forEach((resolve) => resolve());
   }
+
+  /** A trip deleted: writes still waiting are let go, and nothing more is remembered of it. */
+  const forget = (id) => {
+    forgotten.add(id);
+    const queue = queues.get(id);
+    if (queue) { queue.jobs.forEach((job) => job.reject(new TripWriteError('dropped'))); queue.jobs = []; }
+    gone(id);
+    failedCreates.delete(id);
+    notify();
+  };
 
   const readJob = (id) => {
     const entry = { kind: 'read', id };
@@ -234,21 +264,16 @@ export default function createTripWriter(getAuth) {
     /** As drain, and then the trip as remembered is the server's: read again after a lost reply, or a failure. */
     settled: async (id) => {
       await drain(id);
-      if (!uncertain.has(id)) return;
+      if (closed || forgotten.has(id) || !uncertain.has(id)) return;
       const read = readJob(id);
       queueFor(id).jobs.push(read);
       void pump(id);
       await read.promise;
       if (uncertain.has(id)) throw new TripWriteError('failed');
     },
-    /** A trip deleted: writes still waiting are let go, and nothing more is remembered of it. */
-    forget: (id) => {
-      forgotten.add(id);
-      const queue = queues.get(id);
-      if (queue) { queue.jobs.forEach((job) => job.reject(new TripWriteError('dropped'))); queue.jobs = []; }
-      trips.delete(id); facts.delete(id); failedCreates.delete(id); written.delete(id);
-      notify();
-    },
+    forget,
+    /** Deletes a trip in its turn through `send`, then forgets it; if `send` fails, later writes go on. */
+    remove: (id, send) => (forgotten.has(id) ? Promise.resolve() : enqueue({ kind: 'delete', id, send })),
     /** The account changed: nothing waiting is sent, and nothing still on its way is kept. */
     close: () => {
       closed = true;
@@ -274,8 +299,8 @@ export default function createTripWriter(getAuth) {
       return trips.get(trip.id);
     },
     known: (id) => trips.get(id),
-    /** How many trips have writes waiting or running. */
-    queued: () => queues.size,
+    /** How many trips have writes waiting or running; with an ID, whether this one does. */
+    queued: (id) => (id === undefined ? queues.size : queues.has(id)),
     /** Whether the trip as remembered may be behind the server, after a write whose reply was lost. */
     uncertain: (id) => uncertain.has(id),
     subscribe: (listener) => { listeners.add(listener); return () => listeners.delete(listener); },

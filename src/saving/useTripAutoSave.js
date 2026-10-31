@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
-import { newId } from './api';
+import { newId, sameData } from './api';
 import { copyTitle, titleFacts, titleFromFacts } from './tripTitles';
 
 const UNSAVABLE = 'This route cannot be saved. Choose a Google place for every stop and calculate again.';
@@ -9,6 +9,13 @@ const noStore = { subscribe: () => () => {}, version: () => 0 };
 const tripKey = (id) => 'trip:' + id;
 const LOOSE = 'loose';
 const routeKey = (id) => 'route:' + id;
+// What a route's status line says. A route with no trip the writer knows was let go, so it is not saved.
+const phaseOf = (writer, route, held, status) => {
+  if (!route) return 'idle';
+  if (!writer) return 'signed-out';
+  const phase = status ? status.phase : 'saved';
+  return phase === 'saved' && !(held && writer.known(held.id)) ? 'unsaved' : phase;
+};
 
 /**
  * Calculating a route saves it for a signed-in user: the first calculation creates the trip and
@@ -21,21 +28,30 @@ const routeKey = (id) => 'route:' + id;
  * is idle. Retry always saves the planner's latest route for that trip.
  */
 export default function useTripAutoSave({ writer, result, trip, onTrip, onChanged }) {
-  const live = useRef({ writer, trip, onTrip, onChanged });
-  live.current = { writer, trip, onTrip, onChanged };
+  const live = useRef({ writer, trip, result, onTrip, onChanged });
+  live.current = { writer, trip, result, onTrip, onChanged };
   const store = writer || noStore;
   useSyncExternalStore(store.subscribe, store.version);
   // Per writer: routes saved once already; per trip, the planner's latest route and the title facts the
   // server's title was last confirmed from; and a route whose trip was deleted elsewhere.
   const lane = useRef({ writer: null });
-  if (lane.current.writer !== writer) lane.current = { writer, done: new Set(), trips: new Map(), loose: null };
+  if (lane.current.writer !== writer) lane.current = { writer, done: new Set(), trips: new Map(), loose: null, showing: new Set() };
   const [statuses, setStatuses] = useState({ writer: null, byKey: {} });
+  // Kept beside the state, so a load can ask how a save ended ahead of the next render.
+  const latest = useRef(statuses);
 
-  const show = useCallback((key, status, token) => setStatuses((old) => {
+  const show = useCallback((key, status, token) => {
+    const old = latest.current;
     const byKey = old.writer === live.current.writer ? old.byKey : {};
-    if (token && byKey[key]?.token !== token) return old;
-    return { writer: live.current.writer, byKey: { ...byKey, [key]: status } };
-  }), []);
+    if (token && byKey[key]?.token !== token) return;
+    latest.current = { writer: live.current.writer, byKey: { ...byKey, [key]: status } };
+    setStatuses(latest.current);
+  }, []);
+  const statusOf = (byKey, route, held) => {
+    if (!route) return null;
+    const { loose } = lane.current;
+    return byKey[routeKey(route.id)] || (held ? byKey[tripKey(held.id)] : loose?.resultId === route.id ? byKey[LOOSE] : null) || null;
+  };
 
   // Shows how a save of a trip ended, unless a newer save of that trip has taken over its status.
   const track = useCallback((tripId, promise, { create = false, retry }) => {
@@ -43,22 +59,24 @@ export default function useTripAutoSave({ writer, result, trip, onTrip, onChange
     const own = lane.current;
     const key = tripKey(tripId);
     const token = {};
+    // A trip loaded into the planner again starts a new record, which an older save can no longer touch.
+    const record = own.trips.get(tripId);
+    const replaced = () => own.trips.get(tripId) !== record;
     show(key, { phase: 'saving', message: '', token });
-    promise.then(() => {
-      const record = own.trips.get(tripId);
+    const shown = promise.then(() => {
+      if (live.current.writer === owner) live.current.onChanged?.();
+      if (replaced()) return;
       if (record) { record.failedCreate = null; record.created = true; }
       show(key, { phase: 'saved', message: '' }, token);
-      if (live.current.writer === owner) live.current.onChanged?.();
     }, (error) => {
-      if (live.current.writer !== owner) return;
-      const record = own.trips.get(tripId);
+      if (live.current.writer !== owner || replaced()) return;
       // A change dropped behind a new trip that failed to save shows that failure, with its Retry.
       if (error.kind === 'dropped') { show(key, record?.failedCreate || null, token); return; }
       if (error.kind === 'refused') {
         // A new trip the server would not take never existed, so calculating again starts a new one.
         if (create && record && !record.created) {
           own.trips.delete(tripId);
-          if (live.current.trip?.id === tripId) live.current.onTrip(null);
+          live.current.onTrip((held) => (held?.id === tripId ? null : held));
           show(routeKey(record.route.id), { phase: 'unsavable', message: 'This route cannot be saved. Calculate it again to save it.' });
           show(key, null);
           return;
@@ -68,7 +86,7 @@ export default function useTripAutoSave({ writer, result, trip, onTrip, onChange
           : 'This route cannot be saved. Calculate it again to save it.' }, token);
         return;
       }
-      const status = { phase: 'error', message: error.status === 401 ? 'Your sign-in expired.' : '' };
+      const status = { phase: 'error', message: '' };
       // A trip deleted elsewhere lets go of the route; its changes are kept, and Retry saves them as a new trip.
       if (error.kind === 'detached' && live.current.trip?.id === tripId && record) {
         own.loose = { route: record.route, resultId: record.route.id };
@@ -79,6 +97,9 @@ export default function useTripAutoSave({ writer, result, trip, onTrip, onChange
       if (create && record) record.failedCreate = status;
       show(key, status, token);
     });
+    const finish = () => own.showing.delete(shown);
+    own.showing.add(shown);
+    shown.then(finish, finish);
     return promise;
   }, [show]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -98,7 +119,8 @@ export default function useTripAutoSave({ writer, result, trip, onTrip, onChange
     const own = lane.current;
     own.loose = null;
     own.trips.set(id, { route, facts, confirmed: facts, created: false, edited: false, failedCreate: null });
-    live.current.onTrip({ id, title, opened: false, facts });
+    live.current.trip = { id, title, opened: false, facts };
+    live.current.onTrip(live.current.trip);
     sendCreate(id, live.current.writer.create({ id, title, snapshot: route.snapshot, facts }));
   }, [show]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -110,7 +132,7 @@ export default function useTripAutoSave({ writer, result, trip, onTrip, onChange
       record.failedCreate = null;
       const created = error.retry();
       sendCreate(tripId, created);
-      created.then(() => { if (record.edited) sendLatest(tripId); }, () => {});
+      created.then(() => { if (record.edited && lane.current.trips.get(tripId) === record) sendLatest(tripId); }, () => {});
     } });
   }
 
@@ -134,6 +156,7 @@ export default function useTripAutoSave({ writer, result, trip, onTrip, onChange
     try { facts = titleFacts(route); } catch (_) { /* The trip keeps the title it has. */ }
     lane.current.trips.set(tripId, { route, facts, confirmed: facts, created: true, edited: false, failedCreate: null });
     show(tripKey(tripId), null);
+    return facts;
   }, [show]);
 
   // The route changed: remember it for the trip the planner holds, and send it.
@@ -181,19 +204,28 @@ export default function useTripAutoSave({ writer, result, trip, onTrip, onChange
     live.current.onChanged?.();
   }, []);
 
-  const byKey = statuses.writer === writer ? statuses.byKey : {};
-  const loose = lane.current.loose;
-  let status = null;
-  if (result) {
-    status = byKey[routeKey(result.id)]
-      || (trip ? byKey[tripKey(trip.id)] : loose?.resultId === result.id ? byKey[LOOSE] : null) || null;
-  }
-  let phase = 'idle';
-  if (result && !writer) phase = 'signed-out';
-  else if (result && status) phase = status.phase;
-  else if (result) phase = shown ? 'saved' : 'unsaved';
+  // Whether the route on screen is not saved, as of the last save to end: 'failed' with its Retry, 'refused'
+  // with none, 'unsaved' if its trip was deleted, or null. A save whose reply was lost may have landed after
+  // all: a route the trip holds, as last read, is not unsaved.
+  const unsaved = useCallback(() => {
+    const box = latest.current;
+    const { writer: current, result: route, trip: held } = live.current;
+    const phase = phaseOf(current, route, held, statusOf(box.writer === current ? box.byKey : {}, route, held));
+    if (phase === 'unsaved') return 'unsaved';
+    if (phase !== 'error' && phase !== 'unsavable') return null;
+    const confirmed = held && current?.known(held.id);
+    if (confirmed && route.snapshot && sameData(confirmed.snapshot, route.snapshot)) return null;
+    return phase === 'error' ? 'failed' : 'refused';
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  // Resolves once every save under way has ended and shown how.
+  const saveEnded = useCallback(async () => {
+    const { showing } = lane.current;
+    while (showing.size) await Promise.allSettled([...showing]); // eslint-disable-line no-await-in-loop
+  }, []);
+
+  const status = statusOf(statuses.writer === writer ? statuses.byKey : {}, result, trip);
   // A saved trip deleted from My trips leaves its route here, unsaved.
-  if (phase === 'saved' && !shown) phase = 'unsaved';
+  const phase = phaseOf(writer, result, trip, status);
   const retry = useCallback(() => status?.retry?.(), [status]);
-  return { phase, message: status?.message || '', trip: shown, retry, rename, saveAsNew, saveAgain, saveEdits, hold };
+  return { phase, message: status?.message || '', trip: shown, retry, rename, saveAsNew, saveAgain, saveEdits, hold, unsaved, saveEnded };
 }
