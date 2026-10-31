@@ -1,6 +1,5 @@
-import React, { useEffect, useId, useRef, useState } from 'react';
-import { SavedApiError, canonicalText, newId, requestJSON, sameData } from './api';
-import { Chevron } from './SavedLocationControls';
+import React, { useEffect, useRef, useState } from 'react';
+import { SavedApiError, canonicalText, requestJSON, sameData } from './api';
 import InlineEdit from './InlineEdit';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -15,12 +14,14 @@ function fields(value, required, optional = []) {
   }
 }
 
-function canonicalSnapshot(value) {
+export function canonicalSnapshot(value) {
   fields(value, ['schema_version', 'inputs', 'routes']);
   if (value.schema_version !== 1) throw new Error('Unsupported saved trip.');
   fields(value.inputs, ['drivers', 'passengers', 'destination']);
-  const point = (row, driver = false) => {
-    fields(row, driver ? ['stop_id', 'source', 'capacity'] : ['stop_id', 'source'], ['label']);
+  // Drivers and pickups may name a person; a destination is only a place.
+  const point = (row, driver = false, person = true) => {
+    fields(row, driver ? ['stop_id', 'source', 'capacity'] : ['stop_id', 'source'],
+      person ? ['label', 'location_id', 'person'] : ['label', 'location_id']);
     if (typeof row.stop_id !== 'string' || !STOP_ID.test(row.stop_id)) throw new Error('Invalid stop.');
     fields(row.source, ['kind', 'place_id']);
     const place = row.source.place_id;
@@ -30,6 +31,11 @@ function canonicalSnapshot(value) {
     }
     const label = canonicalText(row.label === undefined ? '' : row.label, 1000, 1000, true);
     const result = { stop_id: row.stop_id, label, source: { kind: 'google_places', place_id: place } };
+    if (row.location_id !== undefined) {
+      if (typeof row.location_id !== 'string' || !UUID.test(row.location_id)) throw new Error('Invalid saved location link.');
+      result.location_id = row.location_id;
+    }
+    if (row.person !== undefined) result.person = canonicalText(row.person, 80, 320);
     if (driver) {
       if (!Number.isSafeInteger(row.capacity) || row.capacity < 1) throw new Error('Invalid capacity.');
       result.capacity = row.capacity;
@@ -42,7 +48,7 @@ function canonicalSnapshot(value) {
   }
   const drivers = value.inputs.drivers.map((row) => point(row, true));
   const passengers = value.inputs.passengers.map((row) => point(row));
-  const destination = point(value.inputs.destination);
+  const destination = point(value.inputs.destination, false, false);
   const ids = [...drivers, ...passengers, destination].map((row) => row.stop_id);
   if (new Set(ids).size !== ids.length || !Array.isArray(value.routes) || value.routes.length !== drivers.length) {
     throw new Error('Invalid saved assignments.');
@@ -69,7 +75,7 @@ function validStamp(value) {
   return typeof value === 'string' && STAMP.test(value) && Number.isFinite(Date.parse(value));
 }
 
-function readTrip(body, id) {
+export function readTrip(body, id) {
   fields(body, ['trip']);
   const trip = body.trip;
   fields(trip, ['id', 'title', 'created_at', 'snapshot']);
@@ -107,20 +113,13 @@ function failureMessage(error, fallback) {
   return fallback;
 }
 
-function freezeIntent(value) {
-  Object.values(value).forEach((child) => {
-    if (child && typeof child === 'object') freezeIntent(child);
-  });
-  return Object.freeze(value);
-}
-
 const emptyList = (scope) => ({ scope, trips: [], cursor: null, loaded: false, loading: false, error: '' });
 
-export default function SavedTripsPanel({ auth, snapshot, onLoad, onBeginLoad, onEndLoad, routeAvailable = false, activeView = 'all',
-  openedTrip = null, onOpened }) {
+/** My trips: the saved list, renamed and deleted in place; Open shows a trip read-only through `onView`. */
+export default function SavedTripsPanel({ auth, onView, onBeginLoad, onEndLoad, activeView = 'all',
+  openedTrip = null, onOpened, listVersion = 0, viewing = false, children }) {
   const authenticated = auth?.status === 'authenticated' && typeof auth.profile?.id === 'string';
   const scope = authenticated ? `${auth.profile.id}:${auth.generation}` : null;
-  const titleId = useId();
   const refreshButton = useRef(null);
   const returnFocus = useRef(false);
   const mounted = useRef(false);
@@ -128,22 +127,10 @@ export default function SavedTripsPanel({ auth, snapshot, onLoad, onBeginLoad, o
   currentScope.current = scope;
   const controllers = useRef(new Set());
   const listSequence = useRef(0);
-  const saveLock = useRef(false);
   const actionLock = useRef(false);
-  const intentRef = useRef(null);
-  const [title, setTitle] = useState('');
-  const [intent, setIntent] = useState(null);
-  const [saveBusy, setSaveBusy] = useState(false);
-  const [saveError, setSaveError] = useState('');
-  const [saveSuccess, setSaveSuccess] = useState('');
-  const [saveOpen, setSaveOpen] = useState(false);
-  // The last confirmed name and route, and the saved trip they belong to.
-  const [confirmed, setConfirmed] = useState(null);
   // Replies arrive after awaits, so they compare against the trip opened now, not at the click.
   const openedRef = useRef(openedTrip);
   openedRef.current = openedTrip;
-  const confirmedRef = useRef(confirmed);
-  confirmedRef.current = confirmed;
   const [list, setList] = useState(() => emptyList(scope));
   const tripsVisible = activeView === 'trips' || activeView === 'all';
   const tripsVisibleRef = useRef(tripsVisible);
@@ -157,12 +144,9 @@ export default function SavedTripsPanel({ auth, snapshot, onLoad, onBeginLoad, o
   useEffect(() => {
     const pending = controllers.current;
     mounted.current = true;
-    intentRef.current = null;
-    saveLock.current = false;
     actionLock.current = false;
     returnFocus.current = false;
-    setTitle(''); setIntent(null); setConfirmed(null); setSaveBusy(false);
-    setSaveError(''); setSaveSuccess(''); setList(emptyList(scope));
+    setList(emptyList(scope));
     setAction(null); setActionError(''); setActionSuccess(''); setDeleteId(null);
     return () => {
       mounted.current = false;
@@ -188,7 +172,6 @@ export default function SavedTripsPanel({ auth, snapshot, onLoad, onBeginLoad, o
     && request.scope === currentScope.current && !request.controller.signal.aborted;
   const finishRequest = (request) => controllers.current.delete(request.controller);
   const activeList = list.scope === scope ? list : emptyList(scope);
-  const activeIntent = intent?.scope === scope ? intent : null;
 
   const fetchList = async (append = false) => {
     if (!scope || (append && (!activeList.cursor || activeList.loading))) return;
@@ -222,74 +205,12 @@ export default function SavedTripsPanel({ auth, snapshot, onLoad, onBeginLoad, o
     }
   }, [scope, tripsVisible, list.scope, activeList.loaded, activeList.loading, activeList.error]);
 
-  const saveTrip = async (retry = false, asNew = false) => {
-    if (!scope || saveLock.current) return;
-    let attempt = intentRef.current?.scope === scope ? intentRef.current : null;
-    if (attempt && !retry) return;
-    if (!attempt) {
-      try {
-        if (!snapshot) throw new Error('No savable route.');
-        const body = freezeIntent({ id: newId(), title: canonicalText(title, 200, 200), snapshot: canonicalSnapshot(snapshot) });
-        if (!asNew && confirmed?.scope === scope && sameData(confirmed.content, { title: body.title, snapshot: body.snapshot })) return;
-        attempt = { scope, body };
-        intentRef.current = attempt; setIntent(attempt);
-      } catch (error) {
-        setSaveError('Enter a route name of up to 200 bytes and select Google places for every route stop.');
-        return;
-      }
-    }
-    const request = startRequest();
-    saveLock.current = true; setSaveBusy(true); setSaveError(''); setSaveSuccess('');
-    let stage = retry ? 'reconcile' : 'post';
-    try {
-      let response;
-      if (retry) {
-        try {
-          response = await requestJSON(auth, `/saved-trips/${attempt.body.id}`, { signal: request.controller.signal });
-        } catch (error) {
-          if (!isCurrent(request)) return;
-          if (!(error instanceof SavedApiError && error.status === 404)) throw error;
-          // Missing now does not rule out a delayed commit. Reuse the exact same intent.
-          stage = 'post';
-        }
-      }
-      if (!isCurrent(request)) return;
-      if (response === undefined) {
-        response = await requestJSON(auth, '/saved-trips', { method: 'POST', body: attempt.body, signal: request.controller.signal });
-      }
-      if (!isCurrent(request)) return;
-      const trip = readTrip(response, attempt.body.id);
-      if (trip.title !== attempt.body.title || !sameData(trip.snapshot, attempt.body.snapshot)) {
-        throw new SavedApiError(409, 'TRIP_CONFLICT', 'The existing saved trip has different content.');
-      }
-      intentRef.current = null; setIntent(null);
-      setConfirmed({ scope, id: attempt.body.id, content: { title: attempt.body.title, snapshot: attempt.body.snapshot } });
-      setSaveSuccess('Route saved. Find it in My trips.');
-      setSaveOpen(false);
-      onOpened?.({ id: attempt.body.id, title: attempt.body.title });
-      if (tripsVisibleRef.current) {
-        void fetchList();
-      } else {
-        // Keep the cache across views, but fetch a new first page on the next visit.
-        listSequence.current += 1;
-        setList((old) => ({ ...old, loaded: false, loading: false, error: '' }));
-      }
-    } catch (error) {
-      if (!isCurrent(request)) return;
-      const definitive = error instanceof SavedApiError && (error.status === 409
-        || (stage === 'post' && [400, 413, 415].includes(error.status)));
-      if (definitive) {
-        intentRef.current = null; setIntent(null);
-        setSaveError(error.status === 409 ? 'This save conflicts with an existing trip. It was not confirmed. You can start a new save.'
-          : 'This route could not be saved. Check the route name and selected places.');
-      } else {
-        setSaveError('Save status is unknown. Check and retry this save before starting another.');
-      }
-    } finally {
-      finishRequest(request);
-      if (isCurrent(request)) { saveLock.current = false; setSaveBusy(false); }
-    }
-  };
+  // A trip saved or renamed elsewhere makes the first page stale; it is fetched again when shown.
+  useEffect(() => {
+    if (!listVersion) return;
+    listSequence.current += 1;
+    setList((old) => ({ ...old, loaded: false, loading: false, error: '' }));
+  }, [listVersion]);
 
   const loadTrip = async (id) => {
     if (!scope || actionLock.current) return;
@@ -305,13 +226,7 @@ export default function SavedTripsPanel({ auth, snapshot, onLoad, onBeginLoad, o
       const response = await requestJSON(auth, `/saved-trips/${id}`, { signal: request.controller.signal });
       if (!isCurrent(request)) return;
       const trip = readTrip(response, id);
-      await onLoad(trip.snapshot, loadToken);
-      if (isCurrent(request)) {
-        setActionSuccess('Trip loaded with fresh place details.');
-        setTitle(trip.title); setSaveError(''); setSaveSuccess('');
-        setConfirmed({ scope, id: trip.id, content: { title: trip.title, snapshot: trip.snapshot } });
-        onOpened?.({ id: trip.id, title: trip.title });
-      }
+      await onView(trip, loadToken);
     } catch (error) {
       if (isCurrent(request)) setActionError(failureMessage(error, 'This trip could not be loaded. Check place availability and try again.'));
     } finally {
@@ -339,31 +254,9 @@ export default function SavedTripsPanel({ auth, snapshot, onLoad, onBeginLoad, o
       const summary = { title: trip.title, driver_count: trip.snapshot.inputs.drivers.length,
         passenger_count: trip.snapshot.inputs.passengers.length };
       setList((old) => ({ ...old, trips: old.trips.map((row) => row.id === id ? { ...row, ...summary } : row) }));
-      if (openedRef.current?.id === id) onOpened?.({ id, title: trip.title });
+      if (openedRef.current?.id === id) onOpened?.({ ...openedRef.current, title: trip.title });
       return trip;
     } finally { finishRequest(request); }
-  };
-
-  const updateTrip = async () => {
-    if (!scope || saveLock.current || !openedTrip || !snapshot) return;
-    let body;
-    try { body = { title: canonicalText(title, 200, 200), snapshot: canonicalSnapshot(snapshot) }; }
-    catch (error) { setSaveError('Enter a route name of up to 200 bytes and select Google places for every route stop.'); return; }
-    const owner = scope;
-    saveLock.current = true; setSaveBusy(true); setSaveError(''); setSaveSuccess('');
-    try {
-      const trip = await patchTrip(openedTrip.id, body);
-      if (!trip) return;
-      if (openedRef.current?.id === trip.id) {
-        setConfirmed({ scope, id: trip.id, content: { title: trip.title, snapshot: trip.snapshot } });
-      }
-      setSaveSuccess(`Updated “${trip.title}”.`);
-      setSaveOpen(false);
-    } catch (error) {
-      // An account change aborts the request; the next owner must not see this owner's failure.
-      if (error?.name === 'AbortError' || currentScope.current !== owner) return;
-      setSaveError(failureMessage(error, 'The update could not be confirmed. Please retry.'));
-    } finally { saveLock.current = false; setSaveBusy(false); }
   };
 
   const renameTrip = async (trip, next) => {
@@ -376,15 +269,6 @@ export default function SavedTripsPanel({ auth, snapshot, onLoad, onBeginLoad, o
       const updated = await patchTrip(trip.id, { title: name });
       if (!updated) return;
       setActionSuccess(`Renamed to “${updated.title}”.`);
-      if (openedRef.current?.id === trip.id) {
-        // Carry the new name into the save form, so a later Update cannot write the old name back.
-        // A name the user is still editing there is kept.
-        const known = confirmedRef.current;
-        const previous = known?.scope === scope && known.id === trip.id ? known.content.title : null;
-        setTitle((current) => (current === previous ? updated.title : current));
-        setConfirmed((old) => (old?.scope === scope && old.id === trip.id
-          ? { ...old, content: { ...old.content, title: updated.title } } : old));
-      }
     } catch (error) {
       if (error?.name === 'AbortError' || currentScope.current !== owner) throw error;
       setActionError(failureMessage(error, 'The new name could not be saved. Please retry.'));
@@ -404,11 +288,8 @@ export default function SavedTripsPanel({ auth, snapshot, onLoad, onBeginLoad, o
       if (response !== null) throw new Error('Invalid delete response.');
       setList((old) => ({ ...old, trips: old.trips.filter((trip) => trip.id !== id), loading: false }));
       setDeleteId(null); setActionSuccess('Trip deleted.');
-      if (openedRef.current?.id === id) {
-        // The planner must stop editing a trip that no longer exists.
-        setConfirmed((old) => (old?.id === id ? null : old));
-        onOpened?.(null);
-      }
+      // The planner must stop updating a trip that no longer exists.
+      if (openedRef.current?.id === id) onOpened?.(null);
       returnFocus.current = true;
     } catch (error) {
       if (isCurrent(request)) {
@@ -423,62 +304,16 @@ export default function SavedTripsPanel({ auth, snapshot, onLoad, onBeginLoad, o
 
   // Hide all prior-owner labels and messages on the account-transition render itself.
   if (!scope || list.scope !== scope) return null;
-  let alreadySaved = false;
-  try {
-    alreadySaved = confirmed?.scope === scope && !!snapshot && sameData(confirmed.content,
-      { title: canonicalText(title, 200, 200), snapshot: canonicalSnapshot(snapshot) });
-  } catch (error) { /* An incomplete name or route is not a confirmed save. */ }
   const activeAction = action?.scope === scope ? action : null;
-  const saveVisible = (activeView === 'plan' || activeView === 'all') && (routeAvailable || !!activeIntent);
 
   return (
     <>
-    <section className="saving-card trip-save" aria-label="Save route" hidden={!saveVisible}>
-      <button type="button" className="secondary-button disclosure-button" aria-expanded={saveOpen || !!activeIntent}
-        aria-controls={titleId + '-panel'} disabled={!!activeIntent} onClick={() => { setSaveOpen((open) => !open); setSaveSuccess(''); }}>
-        {openedTrip ? 'Save changes' : 'Save this route'} <Chevron open={saveOpen || !!activeIntent} />
-      </button>
-      <div id={titleId + '-panel'} className="trip-save-form" hidden={!saveOpen && !activeIntent}>
-        <label htmlFor={titleId}>Route name</label>
-        <input id={titleId} type="text" value={title} disabled={!!activeIntent || saveBusy}
-          placeholder="e.g. Friday dinner" onChange={(event) => {
-            setTitle(event.target.value); setSaveError(''); setSaveSuccess('');
-          }} onKeyDown={(event) => {
-            if (event.key !== 'Enter' || !snapshot || !title.trim() || alreadySaved || saveBusy) return;
-            // Enter matches the primary button: update an opened trip, otherwise save a new one.
-            event.preventDefault();
-            void (openedTrip ? updateTrip() : saveTrip());
-          }} />
-        <div className="saving-actions">
-          {activeIntent ? (
-            <button type="button" disabled={saveBusy} onClick={() => void saveTrip(true)}>
-              {saveBusy ? 'Saving…' : 'Check and retry save'}
-            </button>
-          ) : openedTrip ? (<>
-            <button type="button" disabled={!snapshot || saveBusy || alreadySaved || !title.trim()} onClick={() => void updateTrip()}>
-              {saveBusy ? 'Saving…' : alreadySaved ? 'No changes to save' : `Update “${openedTrip.title}”`}
-            </button>
-            <button type="button" className="secondary-button" disabled={!snapshot || saveBusy || !title.trim()}
-              onClick={() => void saveTrip(false, true)}>Save as new trip</button>
-          </>) : (
-            <button type="button" disabled={!snapshot || saveBusy || alreadySaved || !title.trim()} onClick={() => void saveTrip()}>
-              {saveBusy ? 'Saving…' : alreadySaved ? 'Route saved' : 'Save route'}
-            </button>
-          )}
-        </div>
-        {!snapshot && <p className="saving-note">{routeAvailable
-          ? 'To save this route, select a Google place for every stop and calculate again.'
-          : 'Calculate a route to save it.'}</p>}
-        {activeIntent && <p className="saving-note">This attempt keeps its original name and route until its save status is resolved.</p>}
-      </div>
-      {saveError && <p className="saving-error" role="alert">{saveError}</p>}
-      {saveSuccess && <p className="saving-success" role="status">{saveSuccess}</p>}
-    </section>
     <section className="saving-card" hidden={!tripsVisible}
       id={activeView === 'all' ? undefined : 'planner-panel-trips'}
       role={activeView === 'all' ? undefined : 'tabpanel'}
       aria-labelledby={activeView === 'all' ? undefined : 'planner-tab-trips'}
       aria-label={activeView === 'all' ? 'My trips' : undefined}>
+        {viewing ? children : <>
         <div className="list-heading">
           <h2>My trips{activeList.trips.length ? ` (${activeList.trips.length})` : ''}</h2>
           <button ref={refreshButton} type="button" className="text-button" disabled={activeList.loading || !!activeAction}
@@ -487,7 +322,7 @@ export default function SavedTripsPanel({ auth, snapshot, onLoad, onBeginLoad, o
         {activeList.loading && !activeList.trips.length && <p className="saving-note" role="status">Loading saved trips…</p>}
         {activeList.error && <p className="saving-error" role="alert">{activeList.error}</p>}
         {activeList.loaded && !activeList.loading && activeList.trips.length === 0 && !activeList.error
-          && <p className="saving-note">No saved trips yet. Save a calculated route to find it here.</p>}
+          && <p className="saving-note">No saved trips yet. Calculate a route while signed in and it is saved here.</p>}
         <ul className="saving-list">
           {activeList.trips.map((trip) => (
             <li key={trip.id} className="saving-item location-item">
@@ -529,6 +364,7 @@ export default function SavedTripsPanel({ auth, snapshot, onLoad, onBeginLoad, o
         </div>}
         {actionError && <p className="saving-error" role="alert">{actionError}</p>}
         {actionSuccess && <p className="saving-success" role="status">{actionSuccess}</p>}
+        </>}
     </section>
     </>
   );

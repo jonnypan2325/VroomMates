@@ -1,9 +1,15 @@
 import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import AddressInput from './components/AddressInput';
-import SavedTripsPanel from './saving/SavedTripsPanel';
+import SavedTripsPanel, { canonicalSnapshot, readTrip } from './saving/SavedTripsPanel';
+import { requestJSON } from './saving/api';
+import TripSaveStatus from './saving/TripSaveStatus';
 import useSavedLocations from './saving/useSavedLocations';
+import useTripAutoSave from './saving/useTripAutoSave';
+import RouteResults from './results/RouteResults';
+import useRouteMap from './results/useRouteMap';
 import { SavedLocationControls, SavedLocationsPanel } from './saving/SavedLocationControls';
-import { freezeInputs, makeResult, newDriver, newPoint, newPassengerPickup, resizePickup, expandPassengerPickups, groupPassengerPickups, reopenSnapshot } from './saving/tripSnapshot';
+import { freezeInputs, makeResult, newDriver, newPoint, newPassengerPickup, resizePickup, expandPassengerPickups, groupPassengerPickups, reopenSnapshot,
+  nameChange, renameDestination, renameInResult, renameInSnapshot, renamePoints } from './saving/tripSnapshot';
 import { hasCoordinates, resolvePlace } from './saving/places';
 import './saving/Saving.css';
 
@@ -69,17 +75,54 @@ function SavedRowSync({ saved, map, drivers, passengers, destination, setDrivers
   return null;
 }
 
-function AccountBoundary({ auth, children }) {
+function AccountBoundary({ auth, savedRef, children }) {
   const saved = useSavedLocations(auth);
+  // Opening a trip reads the owner's locations later, outside render.
+  useEffect(() => { savedRef.current = saved; }, [saved, savedRef]);
   return children(saved);
 }
 
-export default function LocationInput({ map, directionsRenderer, auth }) {
+/** Names the saved locations that moved, which the route still visits at their old places. */
+function ChangedNotice({ result, onRecalculate, busy }) {
+  const ids = new Set(result.moved || []);
+  const places = [...new Set([...result.inputs.drivers, ...result.inputs.passengers, result.inputs.destination]
+    .filter((point) => ids.has(point.stop_id)).map((point) => point.label || point.place_name || point.address))];
+  const list = new Intl.ListFormat(undefined, { style: 'long', type: 'conjunction' }).format(places);
+  return <div className="trip-notice" role="status">
+    <p>{places.length ? `${list} ${places.length === 1 ? 'has' : 'have'} moved.` : 'Some locations have moved.'}</p>
+    <button type="button" className="trip-notice-primary" disabled={busy} onClick={onRecalculate}>Recalculate</button>
+  </div>;
+}
+
+function TripView({ view, route, selected, onSelect, onRetry, onBack, onEdit, onRename, busy, saveStatus }) {
+  const { trip, result } = view;
+  const drivers = result.inputs.drivers.length;
+  const people = result.inputs.passengers.length;
+  return <div className="trip-view">
+    <button type="button" className="text-button trip-view-back" onClick={onBack}>
+      <svg aria-hidden="true" width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M10 3.5 5.5 8l4.5 4.5" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" /></svg>
+      My trips</button>
+    <h2>{trip.title}</h2>
+    <p className="saving-note trip-view-meta">{drivers} {drivers === 1 ? 'driver' : 'drivers'} · {people} {people === 1 ? 'passenger' : 'passengers'} · saved {new Date(trip.created_at).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}</p>
+    {result.changed && <ChangedNotice result={result} busy={busy} onRecalculate={() => onEdit(true)} />}
+    <RouteResults result={result} routes={route.routes} legs={route.legs} status={route.status}
+      selected={selected} onSelect={onSelect} onRetry={onRetry} onRename={onRename}>{saveStatus}</RouteResults>
+    <button type="button" className="secondary-button trip-view-edit" disabled={busy} onClick={() => onEdit(false)}>Edit in planner</button>
+  </div>;
+}
+
+export default function LocationInput({ map, auth }) {
   const [drivers, setDrivers] = useState(() => [newDriver()]);
   const [passengers, setPassengers] = useState(() => [newPassengerPickup()]);
   const [destination, setDestination] = useState(newPoint);
   const [result, setResult] = useState(null);
-  const [selectedDriver, setSelectedDriver] = useState(0);
+  // The chosen driver belongs to one result; any other result opens as the all-drivers overview.
+  const [selection, setSelection] = useState({ id: null, index: null });
+  const [viewedTrip, setViewedTrip] = useState(null);
+  const [listVersion, setListVersion] = useState(0);
+  const [calculateNext, setCalculateNext] = useState(false);
+  const savedRef = useRef(null);
+  const submitRef = useRef(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [activeView, setActiveView] = useState('plan');
@@ -89,20 +132,25 @@ export default function LocationInput({ map, directionsRenderer, auth }) {
   const addDriverButton = useRef(null);
   const addPassengerButton = useRef(null);
   const viewButtons = useRef({});
-  const [mapError, setMapError] = useState('');
-  const [mapBusy, setMapBusy] = useState(false);
   const [mapAttempt, setMapAttempt] = useState(0);
   const revision = useRef(0);
   const operation = useRef(0);
   const controllers = useRef(new Set());
   const mounted = useRef(true);
   const privateOwner = useRef(null);
-  const directionsEpoch = useRef(0);
   const authKey = auth.status === 'authenticated' ? auth.profile.id + ':' + auth.generation : 'anonymous:' + auth.generation;
-  const latest = useRef({ authKey, map, directionsRenderer });
-  latest.current = { authKey, map, directionsRenderer, resultId: result?.id, selectedDriver, mapAttempt, activeView };
-  const previousLifetime = useRef({ authKey, map, directionsRenderer });
+  const latest = useRef({ authKey, map });
+  latest.current = { authKey, map, activeView };
+  const previousLifetime = useRef({ authKey, map });
   const privateStale = privateOwner.current && privateOwner.current !== authKey;
+  const mapResult = privateStale ? null : activeView === 'trips' && viewedTrip ? viewedTrip.result : result;
+  const selected = selection.id && selection.id === mapResult?.id ? selection.index : null;
+  const selectDriver = (index) => setSelection({ id: mapResult?.id || null, index });
+  const route = useRouteMap(map, mapResult, selected, mapAttempt);
+  const autoSave = useTripAutoSave({ auth, result: privateStale ? null : result, trip: openedTrip,
+    // A saved trip is private, so the planner holding it clears when the account changes.
+    onTrip: (trip) => { privateOwner.current = authKey; setOpenedTrip(trip); },
+    onChanged: () => setListVersion((version) => version + 1) });
 
   const invalidate = useCallback(() => {
     setCleared(null); // Any new edit, load or account change ends the chance to undo a reset.
@@ -123,21 +171,16 @@ export default function LocationInput({ map, directionsRenderer, auth }) {
     const { drivers: routeDrivers, passengers: routePassengers, destination: routeDestination } = current.inputs;
     if (![...routeDrivers, ...routePassengers, routeDestination].some((point) => point.saved_id === savedId)) return;
     setResult(null);
-    setSelectedDriver(0);
     setError('A saved place in this route moved. Calculate the route again.');
   }, [invalidate]);
 
   useLayoutEffect(() => {
     const previous = previousLifetime.current;
-    if (previous.authKey !== authKey || previous.map !== map || previous.directionsRenderer !== directionsRenderer) {
-      previousLifetime.current = { authKey, map, directionsRenderer };
+    if (previous.authKey !== authKey || previous.map !== map) {
+      previousLifetime.current = { authKey, map };
       invalidate();
-      previous.directionsRenderer?.set('directions', null);
-      directionsEpoch.current += 1;
-      directionsRenderer?.set('directions', null);
       setError('');
-      setMapError('');
-      if (previous.authKey !== authKey) setActiveView('plan');
+      if (previous.authKey !== authKey) { setActiveView('plan'); setViewedTrip(null); }
       if (privateOwner.current && privateOwner.current !== authKey) {
         privateOwner.current = null;
         setOpenedTrip(null);
@@ -145,10 +188,9 @@ export default function LocationInput({ map, directionsRenderer, auth }) {
         setPassengers([newPassengerPickup()]);
         setDestination(newPoint());
         setResult(null);
-        setSelectedDriver(0);
       }
     }
-  }, [authKey, map, directionsRenderer, invalidate]);
+  }, [authKey, map, invalidate]);
 
   useEffect(() => {
     mounted.current = true;
@@ -156,60 +198,10 @@ export default function LocationInput({ map, directionsRenderer, auth }) {
     return () => {
       mounted.current = false;
       operation.current += 1;
-      directionsEpoch.current += 1;
       pendingControllers.forEach((controller) => controller.abort());
       pendingControllers.clear();
-      directionsRenderer?.set('directions', null);
     };
-  }, [directionsRenderer]);
-
-  useEffect(() => {
-    const route = result?.coordinates[selectedDriver];
-    const epoch = ++directionsEpoch.current;
-    directionsRenderer?.set('directions', null);
-    setMapError('');
-    setMapBusy(false);
-    if (!route || privateStale) return undefined;
-    if (!map || !directionsRenderer || !window.google?.maps?.DirectionsService) {
-      setMapError('Maps is not ready. Retry when the map has loaded.');
-      return undefined;
-    }
-    const owner = authKey;
-    const renderer = directionsRenderer;
-    let finished = false;
-    const isCurrent = () => mounted.current && epoch === directionsEpoch.current &&
-      latest.current.authKey === owner && latest.current.directionsRenderer === renderer &&
-      latest.current.map === map && latest.current.resultId === result.id &&
-      latest.current.selectedDriver === selectedDriver && latest.current.mapAttempt === mapAttempt;
-    setMapBusy(true);
-    const timer = setTimeout(() => {
-      if (!isCurrent() || finished) return;
-      finished = true;
-      setMapBusy(false);
-      setMapError('Map directions timed out. Your route is still loaded. Please retry.');
-    }, 8000);
-    try {
-      const service = new window.google.maps.DirectionsService();
-      service.route({
-        origin: route[0], destination: route[route.length - 1],
-        waypoints: route.slice(1, -1).map((location) => ({ location, stopover: true })),
-        travelMode: window.google.maps.TravelMode.DRIVING,
-      }, (response, status) => {
-        if (!isCurrent() || finished) return;
-        finished = true;
-        clearTimeout(timer);
-        setMapBusy(false);
-        if (status === 'OK') renderer.setDirections(response);
-        else setMapError('Map directions are unavailable. Your route is still loaded. Please retry.');
-      });
-    } catch {
-      finished = true;
-      clearTimeout(timer);
-      setMapBusy(false);
-      setMapError('Map directions are unavailable. Your route assignments are unchanged.');
-    }
-    return () => { finished = true; clearTimeout(timer); directionsEpoch.current += 1; };
-  }, [result, selectedDriver, map, directionsRenderer, authKey, privateStale, mapAttempt]);
+  }, []);
 
   const edit = (setter, id, patch) => {
     invalidate();
@@ -231,14 +223,13 @@ export default function LocationInput({ map, directionsRenderer, auth }) {
 
   // Clears the planner (and any opened trip) but never saved trips or locations; Undo restores it.
   const startOver = () => {
-    const before = { drivers, passengers, destination, result, selectedDriver, openedTrip };
-    invalidate(); setError(''); setMapError('');
+    const before = { drivers, passengers, destination, result, openedTrip };
+    invalidate(); setError('');
     setOpenedTrip(null);
     setDrivers([newDriver()]);
     setPassengers([newPassengerPickup()]);
     setDestination(newPoint());
     setResult(null);
-    setSelectedDriver(0);
     setCleared(before);
     scrollPane.current?.scrollTo({ top: 0 });
   };
@@ -249,7 +240,6 @@ export default function LocationInput({ map, directionsRenderer, auth }) {
     setPassengers(cleared.passengers);
     setDestination(cleared.destination);
     setResult(cleared.result);
-    setSelectedDriver(cleared.selectedDriver);
     setOpenedTrip(cleared.openedTrip);
   };
   const filled = (point) => Boolean(point.address.trim() || point.source);
@@ -311,7 +301,6 @@ export default function LocationInput({ map, directionsRenderer, auth }) {
       if (!body) throw new Error('The route optimizer sent an unreadable reply. Please retry.');
       const frozen = makeResult(inputs, body.optimizedRoutes);
       setResult(frozen);
-      setSelectedDriver(0);
     } catch (failure) {
       if (current(captured) && failure.name !== 'AbortError') setError(failure.message || 'Could not reach the route optimizer. Please retry.');
     } finally {
@@ -320,6 +309,8 @@ export default function LocationInput({ map, directionsRenderer, auth }) {
     }
   };
 
+  submitRef.current = submit;
+
   const beginLoad = () => {
     invalidate(); setError('');
     const captured = token();
@@ -327,30 +318,88 @@ export default function LocationInput({ map, directionsRenderer, auth }) {
     return captured;
   };
   const endLoad = (captured) => { if (captured && current(captured)) setBusy(false); };
-  const loadTrip = async (snapshot, captured) => {
+  // Opening a saved trip shows it read-only; its linked stops follow the owner's My locations.
+  const viewTrip = async (trip, captured) => {
     if (!captured || !current(captured)) throw abortError();
     const controller = new AbortController();
     controllers.current.add(controller);
     setBusy(true);
     try {
-      const restored = await reopenSnapshot(snapshot,
-        (placeId) => resolvePlace(map, placeId, { signal: controller.signal }));
+      const saved = savedRef.current;
+      const complete = saved && !saved.loading && !saved.error ? saved.locations : null;
+      const restored = await reopenSnapshot(trip.snapshot,
+        (placeId) => resolvePlace(map, placeId, { signal: controller.signal }), complete);
       if (!current(captured)) throw abortError();
       privateOwner.current = captured.owner;
-      setDrivers(restored.inputs.drivers);
-      setPassengers(groupPassengerPickups(restored.inputs.passengers));
-      setDestination(restored.inputs.destination);
-      setResult(restored);
-      setSelectedDriver(0);
-      if (latest.current.activeView === 'trips') {
-        setActiveView('plan');
-        viewButtons.current.plan?.focus();
-      }
+      setViewedTrip({ trip, result: restored });
+      scrollPane.current?.scrollTo({ top: 0 });
     } finally {
       controllers.current.delete(controller);
       if (current(captured)) setBusy(false);
     }
   };
+  // Edit in planner loads the viewed trip into Plan trip; Recalculate also calculates it again, which updates the trip.
+  const editInPlanner = (recalculate) => {
+    if (!viewedTrip) return;
+    const { trip, result: restored } = viewedTrip;
+    invalidate(); setError('');
+    setDrivers(restored.inputs.drivers);
+    setPassengers(groupPassengerPickups(restored.inputs.passengers));
+    setDestination(restored.inputs.destination);
+    setResult(restored);
+    setOpenedTrip({ id: trip.id, title: trip.title, opened: true });
+    setViewedTrip(null);
+    setActiveView('plan');
+    viewButtons.current.plan?.focus();
+    if (recalculate) setCalculateNext(true);
+  };
+  // A name belongs to this trip: the planner rows keep it for the next calculation, and the route stays as drawn.
+  const renameInPlanner = (change) => {
+    setDrivers((list) => renamePoints(list, change));
+    setPassengers((list) => renamePoints(list, change));
+    setDestination((point) => renameDestination(point, change));
+    if (!resultRef.current) return null;
+    const next = renameInResult(resultRef.current, change);
+    setResult(next);
+    return next;
+  };
+  const renamePlanned = async (target, text) => {
+    const next = renameInPlanner(nameChange(target, text, resultRef.current));
+    if (next) autoSave.saveNames(next);
+  };
+  // A trip opened from My trips saves a new name straight away; the stops it follows from My locations keep their own names.
+  const renameViewed = async (target, text) => {
+    const view = viewedTrip;
+    if (!view) return;
+    const change = nameChange(target, text, view.result);
+    // The planner may be saving this same trip; its queue then carries the name, so neither save overwrites the other.
+    if (openedTrip?.id === view.trip.id && resultRef.current?.snapshot) {
+      const next = renameInPlanner(change);
+      if (next) autoSave.saveNames(next);
+      setViewedTrip((current) => current?.trip.id === view.trip.id ? { trip: { ...current.trip,
+        snapshot: renameInSnapshot(current.trip.snapshot, change, current.result.inputs.destination.source) },
+      result: renameInResult(current.result, change) } : current);
+      return;
+    }
+    const snapshot = renameInSnapshot(view.trip.snapshot, change, view.result.inputs.destination.source);
+    let saved;
+    try {
+      const response = await requestJSON(auth, `/saved-trips/${view.trip.id}`, { method: 'PATCH',
+        body: { snapshot: canonicalSnapshot(snapshot) } });
+      saved = readTrip(response, view.trip.id);
+    } catch (_) {
+      throw new Error('The name was not saved. Check your connection and try again.');
+    }
+    setViewedTrip((current) => current?.trip.id === saved.id
+      ? { trip: saved, result: renameInResult(current.result, change) } : current);
+    if (openedTrip?.id === saved.id) renameInPlanner(change);
+  };
+  // Recalculate waits one render, so the calculation reads the trip just loaded into the planner.
+  useEffect(() => {
+    if (!calculateNext) return;
+    setCalculateNext(false);
+    void submitRef.current();
+  }, [calculateNext]);
 
   const selectPlace = async (record, point, setter, isDestination = false, append = false) => {
     invalidate(); setError('');
@@ -373,6 +422,7 @@ export default function LocationInput({ map, directionsRenderer, auth }) {
   }, [activeView]);
 
   const navigate = (view, focus = false) => {
+    if (view !== 'trips') setViewedTrip(null);
     setActiveView(view);
     if (focus) viewButtons.current[view]?.focus();
   };
@@ -406,8 +456,8 @@ export default function LocationInput({ map, directionsRenderer, auth }) {
   // Hide private form/result during the account-transition render; layout reset precedes paint.
   if (privateStale) return null;
   return (
-    <AccountBoundary key={authKey} auth={auth}>
-      {(saved) => (
+    <AccountBoundary key={authKey} auth={auth} savedRef={savedRef}>
+      {(saved) => { return (
         <div className="planner">
           {auth.status === 'authenticated' && <SavedRowSync saved={saved} map={map} drivers={drivers} passengers={passengers}
             destination={destination} setDrivers={setDrivers} setPassengers={setPassengers} setDestination={setDestination}
@@ -426,7 +476,7 @@ export default function LocationInput({ map, directionsRenderer, auth }) {
           </div>
           <div className="planner-scroll" ref={scrollPane} tabIndex="0" aria-label="Planner content">
           <div id="planner-panel-plan" role="tabpanel" aria-labelledby="planner-tab-plan" hidden={activeView !== 'plan'}>
-          {openedTrip && auth.status === 'authenticated' ? <div className="editing-trip">
+          {openedTrip?.opened && auth.status === 'authenticated' ? <div className="editing-trip">
             <p>Editing <strong>{openedTrip.title}</strong></p>
             <button type="button" className="text-button" onClick={startOver}>Start over</button>
           </div> : null}
@@ -508,42 +558,34 @@ export default function LocationInput({ map, directionsRenderer, auth }) {
             {cleared ? <p className="saving-note" role="status">Planner cleared.</p>
               : <p id="calculate-missing" className="saving-note">{missing}</p>}
             {cleared ? <button type="button" className="text-button" onClick={undoStartOver}>Undo</button>
-              : dirty && !(openedTrip && auth.status === 'authenticated')
+              : dirty && !(openedTrip?.opened && auth.status === 'authenticated')
                 && <button type="button" className="text-button" onClick={startOver}>Start over</button>}
           </div>}
           {error && <p role="alert" className="saving-error">{error}</p>}
 
-          {result && (
-            <section className="route-summary">
-              <h3>Your route</h3>
-              <div className="label-row">
-                <label htmlFor="driver-view">Driver view</label>
-                {/* Directions load in the label row so the save controls below never jump. */}
-                <span role="status" className="saving-note">{mapBusy ? 'Loading directions…' : ''}</span>
-              </div>
-              <select id="driver-view" value={selectedDriver} onChange={(event) => setSelectedDriver(Number(event.target.value))}>
-                {result.inputs.drivers.map((driver, index) => (
-                  <option key={driver.stop_id} value={index}>{driver.label || 'Driver ' + (index + 1)}</option>
-                ))}
-              </select>
-              {result.saveError && <p className="saving-note">{result.saveError}</p>}
-              {mapError && <div className="saving-error" role="alert">
-                <p>{mapError}</p>
-                <button type="button" className="secondary-button" disabled={mapBusy}
-                  onClick={() => setMapAttempt((attempt) => attempt + 1)}>Retry map directions</button>
-              </div>}
-            </section>
-          )}
+          {result && mapResult === result && <RouteResults result={result} routes={route.routes} legs={route.legs}
+            status={route.status} selected={selected} onSelect={selectDriver} onRetry={() => setMapAttempt((attempt) => attempt + 1)}
+            onRename={renamePlanned}>
+            <TripSaveStatus save={autoSave} auth={auth} />
+            {result.changed && <ChangedNotice result={result} busy={busy} onRecalculate={submit} />}
+          </RouteResults>}
           </div>
-          <SavedTripsPanel auth={auth} activeView={activeView} snapshot={result?.snapshot || null} routeAvailable={!!result}
-            openedTrip={openedTrip} onOpened={setOpenedTrip}
-            onBeginLoad={beginLoad} onEndLoad={endLoad} onLoad={loadTrip} />
+          <SavedTripsPanel auth={auth} activeView={activeView} openedTrip={openedTrip} onOpened={setOpenedTrip}
+            listVersion={listVersion} viewing={!!viewedTrip}
+            onBeginLoad={beginLoad} onEndLoad={endLoad} onView={viewTrip}>
+            {viewedTrip && <TripView view={viewedTrip} route={route} selected={selected} onSelect={selectDriver} busy={busy}
+              onRetry={() => setMapAttempt((attempt) => attempt + 1)} onBack={() => setViewedTrip(null)} onEdit={editInPlanner}
+              onRename={renameViewed}
+              // This trip is also in the planner, whose queue saves its names: a failed save shows here too, with Retry.
+              saveStatus={openedTrip?.id === viewedTrip.trip.id && autoSave.phase === 'error'
+                ? <TripSaveStatus save={autoSave} auth={auth} /> : null} />}
+          </SavedTripsPanel>
           <div id="planner-panel-locations" role="tabpanel" aria-labelledby="planner-tab-locations" hidden={activeView !== 'locations'}>
             <SavedLocationsPanel auth={auth} saved={saved} map={map} activeView={activeView} />
           </div>
           </div>
         </div>
-      )}
+      ); }}
     </AccountBoundary>
   );
 }
