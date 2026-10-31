@@ -581,7 +581,7 @@ test('a name that cannot be saved in a saved trip says so and keeps the old name
 test('a trip open in the planner saves names from its read-only view through the planner, showing a failure there', async () => {
   savedTrip(); show();
   await viewTrip();
-  fireEvent.click(screen.getByRole('button', { name: 'Edit in planner' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Edit trip' }));
   expect(await screen.findByText('Editing', { exact: false })).toHaveTextContent('Editing Friday dinner');
   await viewTrip();
   server.fail = 1;
@@ -627,7 +627,7 @@ test('a saved trip shows its arrive-by, saves a new time straight away, and keep
   await setTime('20:15');
   expect(lastWrite()).toMatchObject({ method: 'PATCH', id: TRIP_ID });
   expect(server.trips.get(TRIP_ID).snapshot.inputs.arrive_by).toBe('2099-10-30T20:15');
-  fireEvent.click(screen.getByRole('button', { name: 'Edit in planner' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Edit trip' }));
   expect(await screen.findByText('Editing', { exact: false })).toBeInTheDocument();
   expect(screen.getByLabelText('Arrive by date')).toHaveValue('2099-10-30');
   expect(screen.getByLabelText('Arrive by time')).toHaveValue('20:15');
@@ -637,7 +637,7 @@ test('a saved trip without an arrive-by opens without one, in the trip view and 
   savedTrip(); show();
   await viewTrip();
   expect(screen.getByLabelText('Arrive by date')).toHaveValue('');
-  fireEvent.click(screen.getByRole('button', { name: 'Edit in planner' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Edit trip' }));
   expect(await screen.findByText('Editing', { exact: false })).toBeInTheDocument();
   expect(screen.getByLabelText('Arrive by date')).toHaveValue('');
   expect(server.writes).toHaveLength(0);
@@ -651,4 +651,114 @@ test('an arrive-by that cannot be saved in a saved trip says so and keeps the sa
   expect(screen.getByRole('alert')).toHaveTextContent('The time was not saved. Check your connection and try again.');
   expect(screen.getByLabelText('Arrive by time')).toHaveValue('19:00');
   expect(server.trips.get(TRIP_ID).snapshot.inputs.arrive_by).toBe('2099-10-30T19:00');
+});
+
+const dayOf = (value) => (typeof value === 'string' ? new Date(value) : value).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+const setDate = (value) => settle(() => fireEvent.change(screen.getByLabelText('Arrive by date'), { target: { value } }));
+
+test('an automatic name follows the arrive-by date and the destination, and back to the calculation day, until renamed', async () => {
+  show(); fillTrip(1); fetch.mockResolvedValue(responseFor(1)); calculate();
+  await saved();
+  const calculated = `Trip to Destination, ${dayOf(new Date())}`;
+  expect(server.writes[0].body.title).toBe(calculated);
+  await setTime('18:45');
+  await settled();
+  await setDate('2099-11-06');
+  await waitFor(() => expect(lastWrite().body).toMatchObject({ title: `Trip to Destination, ${dayOf(new Date(2099, 10, 6))}`,
+    snapshot: { inputs: { arrive_by: '2099-11-06T18:45' } } }));
+  await settled();
+  expect(screen.getByRole('button', { name: /^Trip name: Trip to Destination, / })).toHaveTextContent(dayOf(new Date(2099, 10, 6)));
+  await rename(/^Destination name/, 'Destination name', 'BCD');
+  await waitFor(() => expect(lastWrite().body.title).toBe(`Trip to BCD, ${dayOf(new Date(2099, 10, 6))}`));
+  await settled();
+  await setDate('');
+  await waitFor(() => expect(lastWrite().body.title).toBe(`Trip to BCD, ${dayOf(new Date())}`));
+  await settled();
+  await rename(/^Trip name/, 'Trip name', 'Dinner');
+  await settled();
+  // Clearing the date cleared the time too; a time alone starts on today.
+  await setTime('09:30');
+  await waitFor(() => expect(lastWrite().body.snapshot?.inputs.arrive_by).toBe(`${today()}T09:30`));
+  expect(lastWrite().body).not.toHaveProperty('title');
+  expect(server.trips.get(server.writes[0].id).title).toBe('Dinner');
+});
+
+test('Recalculate with a new destination renames an automatic trip in the same save', async () => {
+  show(); fillTrip(1); fetch.mockResolvedValue(responseFor(1)); calculate();
+  await saved();
+  fill('Destination', 'Elsewhere'); calculate();
+  await waitFor(() => expect(server.writes).toHaveLength(2));
+  await settled();
+  expect(lastWrite()).toMatchObject({ method: 'PATCH', body: { title: `Trip to Elsewhere, ${dayOf(new Date())}` } });
+  expect(lastWrite().body.snapshot.inputs.destination.source.place_id).toBe('Destination');
+});
+
+test('a saved trip with an automatic name follows a new arrive-by in the same save, straight from the trip view', async () => {
+  savedTrip('2099-10-30T19:00');
+  mockTrip.current.title = `Trip to BCD Tofu, ${dayOf(STAMP)}`;
+  server.trips.get(TRIP_ID).title = mockTrip.current.title;
+  show();
+  fireEvent.click(screen.getByRole('tab', { name: 'My trips' }));
+  await settle(() => fireEvent.click(screen.getByRole('button', { name: 'Fixture views trip' })));
+  await setDate('2099-11-02');
+  expect(lastWrite()).toMatchObject({ method: 'PATCH', id: TRIP_ID, body: { title: `Trip to BCD Tofu, ${dayOf(new Date(2099, 10, 2))}` } });
+  expect(await screen.findByRole('heading', { name: `Trip to BCD Tofu, ${dayOf(new Date(2099, 10, 2))}` })).toBeInTheDocument();
+});
+
+test('a saved trip renames in place, straight away, shows when it was last edited, and keeps its name when a save fails', async () => {
+  savedTrip(); show();
+  await viewTrip();
+  expect(screen.getByText(/· last edited /)).toHaveTextContent(`last edited ${dayOf(STAMP)}`);
+  await rename(/^Trip name: Friday dinner/, 'Trip name', 'Dinner at BCD');
+  expect(lastWrite()).toEqual({ method: 'PATCH', id: TRIP_ID, body: { title: 'Dinner at BCD' } });
+  expect(screen.getByRole('heading', { name: 'Dinner at BCD' })).toBeInTheDocument();
+  server.fail = 1;
+  await rename(/^Trip name: Dinner at BCD/, 'Trip name', 'Dinner again');
+  expect(screen.getByRole('alert')).toHaveTextContent('The name was not saved. Check your connection and try again.');
+  expect(screen.getByRole('heading', { name: 'Dinner at BCD' })).toBeInTheDocument();
+  expect(server.trips.get(TRIP_ID).title).toBe('Dinner at BCD');
+});
+
+test('renaming a trip the planner holds goes through its saves and shows in Editing and Saved as', async () => {
+  savedTrip(); show();
+  await viewTrip();
+  fireEvent.click(screen.getByRole('button', { name: 'Edit trip' }));
+  await screen.findByText('Editing', { exact: false });
+  await viewTrip();
+  await rename(/^Trip name: Friday dinner/, 'Trip name', 'Dinner at BCD');
+  await waitFor(() => expect(server.trips.get(TRIP_ID).title).toBe('Dinner at BCD'));
+  fireEvent.click(screen.getByRole('tab', { name: 'Plan trip' }));
+  expect(screen.getByText('Editing', { exact: false })).toHaveTextContent('Editing Dinner at BCD');
+  expect(screen.getByRole('button', { name: /^Trip name: Dinner at BCD/ })).toBeInTheDocument();
+});
+
+test('Edit a copy saves a copy with the same route, names and arrive-by, then edits only the copy', async () => {
+  savedTrip('2099-10-30T19:00');
+  mockTrip.current.snapshot.inputs.passengers[0].person = 'Mia';
+  server.trips.get(TRIP_ID).snapshot.inputs.passengers[0].person = 'Mia';
+  show();
+  await viewTrip();
+  await settle(() => fireEvent.click(screen.getByRole('button', { name: 'Edit a copy' })));
+  expect(await screen.findByText('Editing', { exact: false })).toHaveTextContent('Editing Copy of Friday dinner');
+  const copy = server.writes[0];
+  expect(copy).toMatchObject({ method: 'POST', body: { title: 'Copy of Friday dinner', snapshot: mockTrip.current.snapshot } });
+  await setTime('20:15');
+  await waitFor(() => expect(lastWrite()).toMatchObject({ method: 'PATCH', id: copy.id }));
+  expect(lastWrite().body).not.toHaveProperty('title');
+  expect(server.trips.get(TRIP_ID)).toEqual(mockTrip.current);
+  expect(server.trips.get(copy.id).snapshot.inputs.arrive_by).toBe('2099-10-30T20:15');
+});
+
+test('a copy that cannot be saved says so, stays in the trip view, and a retry never makes two', async () => {
+  savedTrip(); show();
+  await viewTrip();
+  server.fail = 1;
+  await settle(() => fireEvent.click(screen.getByRole('button', { name: 'Edit a copy' })));
+  expect(screen.getByRole('alert')).toHaveTextContent('The copy was not saved. Check your connection and try again.');
+  expect(screen.getByRole('heading', { name: 'Friday dinner' })).toBeInTheDocument();
+  expect(server.trips.size).toBe(1);
+  await settle(() => fireEvent.click(screen.getByRole('button', { name: 'Edit a copy' })));
+  expect(await screen.findByText('Editing', { exact: false })).toHaveTextContent('Editing Copy of Friday dinner');
+  expect(server.writes.map((write) => write.id)).toEqual([server.writes[0].id, server.writes[0].id]);
+  expect(server.trips.size).toBe(2);
 });

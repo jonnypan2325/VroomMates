@@ -13,6 +13,7 @@ from backend.saved_trips import validate_snapshot
 import tests.test_auth as auth_fixture
 
 STAMP = '2030-01-01T00:00:00.000000Z'
+EDITED = '2030-01-02T08:30:00.000000Z'
 
 
 def payload(ident=None, passengers=2):
@@ -50,7 +51,7 @@ class FakeTripStore:
             if {k: existing[k] for k in record} != record:
                 raise SaveConflict('record')
             return copy.deepcopy(existing), False
-        self.rows[key] = dict(copy.deepcopy(record), created_at=STAMP)
+        self.rows[key] = dict(copy.deepcopy(record), created_at=STAMP, updated_at=STAMP)
         if self.lose_after_commit:
             self.lose_after_commit = False
             raise StoreUnavailable()
@@ -72,6 +73,7 @@ class FakeTripStore:
                       'schema_version': row['snapshot']['schema_version'],
                       'driver_count': len(row['snapshot']['inputs']['drivers']),
                       'passenger_count': len(row['snapshot']['inputs']['passengers']),
+                      **({'updated_at': row['updated_at']} if 'updated_at' in row else {}),
                       # The store keeps a copy of the arrive-by time beside each trip for the list.
                       **({'arrive_by': row['snapshot']['inputs']['arrive_by']} if 'arrive_by' in row['snapshot']['inputs'] else {})}
                      for row in rows[:limit]]
@@ -88,7 +90,7 @@ class FakeTripStore:
         self.called('update', owner)
         if (owner, ident) not in self.rows:
             raise SavedNotFound()
-        self.rows[owner, ident].update(copy.deepcopy(changes))
+        self.rows[owner, ident].update(copy.deepcopy(changes), updated_at=EDITED)
         return copy.deepcopy(self.override or self.rows[owner, ident])
 
 
@@ -136,7 +138,7 @@ class SavedTripTests(unittest.TestCase):
         response = self.call('POST', json=value)
         self.assertEqual(response.status_code, 201)
         trip = response.json['trip']
-        self.assertEqual(set(trip), {'id', 'title', 'created_at', 'snapshot'})
+        self.assertEqual(set(trip), {'id', 'title', 'created_at', 'updated_at', 'snapshot'})
         self.assertEqual(trip['title'], 'Fixture trip')
         self.assertEqual(trip['snapshot']['inputs']['passengers'][0]['label'], 'Café')
         self.assertEqual(trip['snapshot']['inputs']['destination']['label'], '')
@@ -240,7 +242,7 @@ class SavedTripTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         row = response.json['trips'][0]
         self.assertEqual(row['id'], max(ids))
-        self.assertEqual(set(row), {'id', 'title', 'created_at', 'schema_version', 'driver_count', 'passenger_count'})
+        self.assertEqual(set(row), {'id', 'title', 'created_at', 'updated_at', 'schema_version', 'driver_count', 'passenger_count'})
         cursor = response.json['next_cursor']
         page = self.call('GET', '/saved-trips?limit=1&cursor=' + cursor)
         self.assertEqual(page.json['trips'][0]['id'], sorted(ids, reverse=True)[1])
@@ -445,7 +447,7 @@ class SavedTripTests(unittest.TestCase):
         rows = listed()
         self.assertEqual(rows[timed['id']]['arrive_by'], '2026-10-30T19:00')
         self.assertNotIn('arrive_by', rows[plain['id']])
-        self.assertEqual(set(rows[plain['id']]), {'id', 'title', 'created_at', 'schema_version', 'driver_count', 'passenger_count'})
+        self.assertEqual(set(rows[plain['id']]), {'id', 'title', 'created_at', 'updated_at', 'schema_version', 'driver_count', 'passenger_count'})
         self.call('PATCH', '/saved-trips/' + timed['id'], json={'title': 'Friday dinner'})
         self.assertEqual(listed()[timed['id']]['arrive_by'], '2026-10-30T19:00')
         self.call('PATCH', '/saved-trips/' + timed['id'], json={'snapshot': payload(timed['id'])['snapshot']})
@@ -460,6 +462,47 @@ class SavedTripTests(unittest.TestCase):
             response = self.call('GET')
             self.assert_error(response, 500, 'SAVED_TRIP_UNREADABLE')
             self.assertNotIn('arrive_by', response.get_data(as_text=True))
+
+    def test_a_trip_says_when_it_was_last_edited(self):
+        value = payload()
+        created = self.call('POST', json=value).json['trip']
+        self.assertEqual(created['updated_at'], created['created_at'])
+        self.assertEqual(self.call('GET').json['trips'][0]['updated_at'], STAMP)
+        for change in [{'title': 'Friday dinner'}, {'snapshot': value['snapshot']}, {'title': 'Dinner', 'snapshot': value['snapshot']}]:
+            self.rows_edit(value['id'], STAMP)
+            edited = self.call('PATCH', '/saved-trips/' + value['id'], json=change).json['trip']
+            self.assertEqual((edited['created_at'], edited['updated_at']), (STAMP, EDITED))
+            self.assertEqual(self.call('GET', '/saved-trips/' + value['id']).json['trip'], edited)
+            self.assertEqual(self.call('GET').json['trips'][0]['updated_at'], EDITED)
+
+    def rows_edit(self, ident, stamp):
+        self.store.rows['google:synthetic-account-a', ident]['updated_at'] = stamp
+
+    def test_a_trip_saved_before_edit_times_still_reads_and_lists_without_one(self):
+        value = payload()
+        self.call('POST', json=value)
+        del self.store.rows['google:synthetic-account-a', value['id']]['updated_at']
+        detail = self.call('GET', '/saved-trips/' + value['id'])
+        self.assertEqual(detail.status_code, 200)
+        self.assertEqual(set(detail.json['trip']), {'id', 'title', 'created_at', 'snapshot'})
+        self.assertEqual(set(self.call('GET').json['trips'][0]),
+                         {'id', 'title', 'created_at', 'schema_version', 'driver_count', 'passenger_count'})
+
+    def test_a_malformed_or_early_edit_time_or_unknown_field_never_reaches_the_response(self):
+        value = payload()
+        self.call('POST', json=value)
+        trip = self.store.get_trip('google:synthetic-account-a', value['id'])
+        summaries, _ = self.store.list_trips('google:synthetic-account-a', 50)
+        for bad in [None, '', 3, '2030-01-01 00:00:00.000000Z', '2030-01-01T00:00:00.000000+01:00',
+                    '2029-12-31T23:59:59.999999Z', 'yesterday']:
+            self.store.override = dict(trip, updated_at=bad)
+            self.assert_error(self.call('GET', '/saved-trips/' + value['id']), 500, 'SAVED_TRIP_UNREADABLE')
+            self.store.override = ([dict(summaries[0], updated_at=bad)], None)
+            self.assert_error(self.call('GET'), 500, 'SAVED_TRIP_UNREADABLE')
+        self.store.override = dict(trip, edited_at=STAMP)
+        self.assert_error(self.call('GET', '/saved-trips/' + value['id']), 500, 'SAVED_TRIP_UNREADABLE')
+        self.store.override = ([dict(summaries[0], edited_at=STAMP)], None)
+        self.assert_error(self.call('GET'), 500, 'SAVED_TRIP_UNREADABLE')
 
     @staticmethod
     def named(person, target='passengers'):

@@ -2,7 +2,7 @@ import React from 'react';
 import { TextEncoder } from 'util';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import '@testing-library/jest-dom';
-import SavedTripsPanel, { canonicalSnapshot } from './SavedTripsPanel';
+import SavedTripsPanel, { canonicalSnapshot, readTrip } from './SavedTripsPanel';
 
 beforeAll(() => {
   global.TextEncoder = TextEncoder;
@@ -291,13 +291,25 @@ test('a rename that lands after another trip opened leaves the newly opened trip
   expect(onOpened).not.toHaveBeenCalled();
 });
 
-it('a trip with an arrive-by is listed by that full date; others keep their save date', async () => {
-  const timed = { ...summary(OTHER_ID, 'Friday dinner'), arrive_by: '2026-10-30T19:00' };
-  await renderPanel(authFor(jest.fn(async () => listed(summary(), timed))));
+it('a trip with an arrive-by is listed by that full date; others by their last edit, or their save before edits were dated', async () => {
+  const timed = { ...summary(OTHER_ID, 'Friday dinner'), arrive_by: '2026-10-30T19:00', updated_at: '2026-10-20T12:00:00Z' };
+  const edited = { ...summary(LOCATION, 'Beach day'), updated_at: '2026-10-20T12:00:00Z' };
+  await renderPanel(authFor(jest.fn(async () => listed(summary(), timed, edited))));
   const full = new Date(2026, 9, 30).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
-  const saved = new Date(stamp).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+  const day = (value) => new Date(value).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
   expect(screen.getByText(`1 driver · 1 passenger · arrive ${full}`)).toBeVisible();
-  expect(screen.getByText(`1 driver · 1 passenger · ${saved}`)).toBeVisible();
+  expect(screen.getByText(`1 driver · 1 passenger · last edited ${day('2026-10-20T12:00:00Z')}`)).toBeVisible();
+  expect(screen.getByText(`1 driver · 1 passenger · last edited ${day(stamp)}`)).toBeVisible();
+});
+it.each([null, '', '2026-10-06 12:00:00Z', '2026-10-05T12:00:00Z', 3])('never lists or opens a trip whose last edit %s is malformed or before its save', async (bad) => {
+  await renderPanel(authFor(jest.fn(async () => listed({ ...summary(), updated_at: bad }))));
+  expect(screen.getByRole('alert')).toHaveTextContent('My Trips could not be loaded');
+  expect(() => readTrip({ trip: { ...detail().trip, updated_at: bad } }, ID)).toThrow('Invalid saved trip response.');
+});
+it('reads a trip with or without its last edit time', () => {
+  expect(readTrip(detail(), ID)).not.toHaveProperty('updated_at');
+  expect(readTrip({ trip: { ...detail().trip, updated_at: stamp } }, ID).updated_at).toBe(stamp);
+  expect(() => readTrip({ trip: { ...detail().trip, edited_at: stamp } }, ID)).toThrow();
 });
 it.each([null, '', '2026-02-30T10:00', 3])('never lists a trip summary with a malformed arrive-by %s', async (bad) => {
   await renderPanel(authFor(jest.fn(async () => listed({ ...summary(), arrive_by: bad }))));
