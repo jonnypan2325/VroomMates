@@ -1,7 +1,11 @@
 import { useState } from 'react';
 import { TextEncoder } from 'util';
 import { act, renderHook } from '@testing-library/react';
-import useTripAutoSave, { automaticTitle, followTitle, titleFacts } from './useTripAutoSave';
+import createTripWriter from './tripWriter';
+import useTripAutoSave from './useTripAutoSave';
+import { followTitle, titleFacts, titleFromFacts } from './tripTitles';
+
+const automaticTitle = (route, now) => titleFromFacts(titleFacts(route), now);
 
 beforeAll(() => { global.TextEncoder = TextEncoder; });
 
@@ -42,34 +46,34 @@ it('an automatic title follows a renamed or recalculated destination, keeping it
     .toBe(`Trip to BCD, ${day(2026, 11, 6)}`);
 });
 
-// Saves through the hook, against an API in memory whose replies can be held back.
+// Saves through the hook and the account's writer, against an API in memory whose replies can be held back.
 const TRIP_A = '11111111-1111-4111-8111-111111111111';
 const TRIP_B = '22222222-2222-4222-8222-222222222222';
 const point = (stop_id) => ({ stop_id, label: '', source: { kind: 'google_places', place_id: stop_id } });
-const snapshotFor = (pickup = 'pickup') => ({ schema_version: 1, inputs: { drivers: [{ ...point('driver'), capacity: 2 }],
-  passengers: [point(pickup)], destination: { ...point('end'), label: 'BCD' } },
+const snapshotFor = (pickup = 'pickup', arriveBy) => ({ schema_version: 1, inputs: { drivers: [{ ...point('driver'), capacity: 2 }],
+  passengers: [point(pickup)], destination: { ...point('end'), label: 'BCD' }, ...(arriveBy ? { arrive_by: arriveBy } : {}) },
   routes: [{ driver_id: 'driver', stop_ids: ['driver', pickup, 'end'] }] });
 let resultCount = 0;
-const routeResult = (origin = 'calculated', pickup = 'pickup') => ({ id: 'result-' + (resultCount += 1), origin,
-  inputs: { destination: { label: 'BCD' } }, snapshot: snapshotFor(pickup) });
+const routeResult = (origin = 'calculated', pickup = 'pickup', arriveBy) => ({ id: 'result-' + (resultCount += 1), origin,
+  inputs: { destination: { label: 'BCD' }, ...(arriveBy ? { arrive_by: arriveBy } : {}) }, snapshot: snapshotFor(pickup, arriveBy) });
 const reply = (status, body) => ({ ok: status < 400, status, json: async () => body });
 function apiServer() {
-  const server = { requests: [], trips: new Map(), held: [], hold: false, status: null, serverTitle: null };
+  const server = { requests: [], trips: new Map(), held: [], hold: false, fail: [] };
   server.protectedRequest = jest.fn((path, options = {}) => {
     const method = options.method || 'GET';
     const body = options.body ? JSON.parse(options.body) : null;
     const id = path.split('/')[2] || body?.id;
     server.requests.push({ method, id, body });
     const answer = () => {
-      if (server.status) return reply(server.status, { error: { code: 'REJECTED' } });
+      if (method !== 'GET' && server.fail.length) return reply(server.fail.shift(), { error: { code: 'SYNTHETIC' } });
       if (method === 'POST') {
         server.trips.set(id, { id, title: body.title, created_at: CREATED, snapshot: body.snapshot });
         return reply(201, { trip: server.trips.get(id) });
       }
       const trip = server.trips.get(id);
       if (!trip) return reply(404, { error: { code: 'NOT_FOUND' } });
-      if (method === 'PATCH') Object.assign(trip, body, server.serverTitle ? { title: server.serverTitle } : {});
-      return reply(200, { trip });
+      if (method === 'PATCH') Object.assign(trip, body);
+      return reply(200, { trip: JSON.parse(JSON.stringify(trip)) });
     };
     if (!server.hold) return Promise.resolve(answer());
     return new Promise((resolve) => server.held.push(() => resolve(answer())));
@@ -77,84 +81,111 @@ function apiServer() {
   server.release = async () => { const next = server.held.shift(); await act(async () => { next(); }); };
   return server;
 }
-// The planner around the hook: it holds the working trip, and a new planner session starts on Start over, Edit and delete.
-function usePlanner({ auth, result, session, start }) {
+// The planner around the hook: it holds the working trip, which only the person's actions change.
+function usePlanner({ writer, result, start }) {
   const [trip, setTrip] = useState(start || null);
-  const save = useTripAutoSave({ auth, result, trip, onTrip: setTrip, onChanged: () => {}, session });
+  const save = useTripAutoSave({ writer, result, trip, onTrip: setTrip, onChanged: () => {} });
   return { save, trip, setTrip };
 }
-let server, auth;
+let server, writer;
 beforeEach(() => {
   Object.defineProperty(globalThis, 'crypto', { configurable: true, value: require('crypto').webcrypto });
   server = apiServer();
-  auth = { status: 'authenticated', generation: 1, profile: { id: 'fixture-a' }, protectedRequest: server.protectedRequest };
+  writer = createTripWriter(() => ({ protectedRequest: server.protectedRequest }));
 });
-const mount = (props) => renderHook((current) => usePlanner(current), { initialProps: { auth, session: 1, ...props } });
+const mount = (props) => renderHook((current) => usePlanner(current), { initialProps: { writer, ...props } });
 const opened = (id, title = 'Friday dinner') => {
   server.trips.set(id, { id, title, created_at: CREATED, snapshot: snapshotFor() });
+  writer.remember(JSON.parse(JSON.stringify(server.trips.get(id))));
   return { id, title, opened: true, created_at: CREATED, facts: facts('BCD') };
 };
 const settle = () => act(async () => {});
+// Once the writer has nothing left to do, no route says "Saving…".
+const idle = async (view) => { await settle(); expect(view.result.current.save.phase).not.toBe('saving'); };
 
-it('a save that lands after Start over stays with that route: the next route saves as a new trip, and Undo gets it back', async () => {
+it('a save that lands after Start over stays with its route: the next route is a new trip, and Undo gets it back', async () => {
   server.hold = true;
   const first = routeResult();
   const view = mount({ result: first });
   await settle();
-  view.rerender({ auth, result: null, session: 2 });
+  const held = view.result.current.trip;
+  act(() => { view.result.current.setTrip(null); });
+  view.rerender({ writer, result: null });
   await server.release();
   expect(view.result.current.trip).toBeNull();
-  view.rerender({ auth, result: first, session: 1 });
-  await settle();
-  expect(view.result.current.trip).toMatchObject({ id: server.requests[0].id });
-  expect(view.result.current.save.phase).toBe('saved');
+  act(() => { view.result.current.setTrip(held); });
+  view.rerender({ writer, result: first });
+  expect(view.result.current.save).toMatchObject({ phase: 'saved', trip: { id: server.requests[0].id } });
   act(() => { view.result.current.setTrip(null); });
-  view.rerender({ auth, result: null, session: 3 });
   server.hold = false;
-  view.rerender({ auth, result: routeResult(), session: 3 });
-  await settle();
+  view.rerender({ writer, result: routeResult() });
+  await idle(view);
   expect(server.requests.map((request) => request.method)).toEqual(['POST', 'POST']);
   expect(server.requests[1].id).not.toBe(server.requests[0].id);
 });
 
-it('a save queued for one trip never goes to another trip opened in its place', async () => {
+it('a new trip whose save failed after Start over shows Not saved with a working Retry on Undo', async () => {
+  server.hold = true;
+  server.fail = [503];
+  const first = routeResult();
+  const view = mount({ result: first });
+  await settle();
+  const held = view.result.current.trip;
+  act(() => { view.result.current.setTrip(null); });
+  view.rerender({ writer, result: null });
+  await server.release();
+  act(() => { view.result.current.setTrip(held); });
+  view.rerender({ writer, result: first });
+  expect(view.result.current.save.phase).toBe('error');
+  server.hold = false;
+  await act(async () => { view.result.current.save.retry(); });
+  await idle(view);
+  expect(view.result.current.save.phase).toBe('saved');
+  expect(server.trips.size).toBe(1);
+});
+
+it('a planner save waiting when another trip is opened still saves to its own trip, never the new one', async () => {
   const view = mount({ result: routeResult('reopened'), start: opened(TRIP_A) });
-  server.trips.set(TRIP_B, { id: TRIP_B, title: 'Beach day', created_at: CREATED, snapshot: snapshotFor() });
+  act(() => { opened(TRIP_B, 'Beach day'); });
   server.hold = true;
   act(() => { view.result.current.save.saveEdits(routeResult('reopened', 'mia')); });
   act(() => { view.result.current.save.saveEdits(routeResult('reopened', 'uci')); });
   act(() => { view.result.current.setTrip({ id: TRIP_B, title: 'Beach day', opened: true, created_at: CREATED, facts: facts('BCD') }); });
-  view.rerender({ auth, result: routeResult('reopened'), session: 2 });
-  await server.release();
-  await settle();
-  expect(server.requests.map((request) => [request.method, request.id])).toEqual([['PATCH', TRIP_A]]);
+  view.rerender({ writer, result: routeResult('reopened') });
+  await server.release(); await server.release();
+  expect(server.requests.map((request) => [request.method, request.id])).toEqual([['PATCH', TRIP_A], ['PATCH', TRIP_A]]);
+  expect(server.trips.get(TRIP_A).snapshot.passengers?.[0]).toBeUndefined();
+  expect(server.trips.get(TRIP_A).snapshot.inputs.passengers[0].stop_id).toBe('uci');
   expect(server.trips.get(TRIP_B).snapshot).toEqual(snapshotFor());
+  expect(view.result.current.trip.id).toBe(TRIP_B);
 });
 
 it('deleting a trip while its save waits drops the save rather than bringing the trip back', async () => {
-  const view = mount({ result: routeResult('reopened'), start: opened(TRIP_A) });
+  const route = routeResult('reopened');
+  const view = mount({ result: route, start: opened(TRIP_A) });
   server.hold = true;
-  act(() => { view.result.current.save.saveEdits(routeResult('reopened', 'mia')); });
-  act(() => { view.result.current.save.saveEdits(routeResult('reopened', 'uci')); });
+  act(() => { view.result.current.save.saveEdits({ ...routeResult('reopened', 'mia'), id: route.id }); });
+  act(() => { view.result.current.save.saveEdits({ ...routeResult('reopened', 'uci'), id: route.id }); });
   server.trips.delete(TRIP_A);
-  act(() => { view.result.current.setTrip(null); });
-  view.rerender({ auth, result: routeResult('reopened'), session: 2 });
+  act(() => { writer.forget(TRIP_A); view.result.current.setTrip(null); });
   await server.release();
-  await settle();
+  await idle(view);
   expect(server.requests.map((request) => request.method)).toEqual(['PATCH']);
   expect(server.trips.size).toBe(0);
+  expect(view.result.current.save.phase).toBe('unsaved');
 });
 
-it('a trip deleted elsewhere lets go of the route, so Retry saves it as a new trip', async () => {
+it('a trip deleted elsewhere lets go of the route, so Retry saves its latest version as a new trip', async () => {
   const view = mount({ result: routeResult('reopened'), start: opened(TRIP_A) });
   server.trips.delete(TRIP_A);
   const edited = routeResult('reopened', 'mia');
   act(() => { view.result.current.save.saveEdits(edited); });
+  view.rerender({ writer, result: edited });
   await settle();
   expect(view.result.current.trip).toBeNull();
-  view.rerender({ auth, result: edited, session: 1 });
   expect(view.result.current.save.phase).toBe('error');
   await act(async () => { view.result.current.save.retry(); });
+  await idle(view);
   expect(server.requests.map((request) => request.method)).toEqual(['PATCH', 'POST']);
   expect(server.trips.get(server.requests[1].id).snapshot).toEqual(edited.snapshot);
   expect(view.result.current.trip).toMatchObject({ id: server.requests[1].id });
@@ -163,19 +194,34 @@ it('a trip deleted elsewhere lets go of the route, so Retry saves it as a new tr
 it('a change the server refuses says it cannot be saved, without a Retry that sends it again', async () => {
   const edited = routeResult('reopened', 'mia');
   const view = mount({ result: edited, start: opened(TRIP_A) });
-  server.status = 400;
+  server.fail = [400];
   act(() => { view.result.current.save.saveEdits(edited); });
-  await settle();
-  expect(view.result.current.save.phase).toBe('unsavable');
-  expect(view.result.current.save.message).toMatch(/cannot be saved/);
+  await idle(view);
+  expect(view.result.current.save).toMatchObject({ phase: 'unsavable', message: expect.stringMatching(/cannot be saved/) });
   await act(async () => { view.result.current.save.retry(); });
   expect(server.requests).toHaveLength(1);
 });
 
-it('a route save never changes the name shown; only a rename does', async () => {
+it('quick arrive-by changes waiting together still move an automatic name once, to the latest date', async () => {
+  const route = routeResult('reopened');
+  const start = opened(TRIP_A, automaticTitle(route, new Date(CREATED)));
+  const view = mount({ result: route, start });
+  server.hold = true;
+  for (const date of ['2099-11-05', '2099-11-06', '2099-11-07']) {
+    act(() => { view.result.current.save.saveEdits({ ...routeResult('reopened', 'pickup', `${date}T18:45`), id: route.id }); });
+  }
+  await server.release(); await server.release();
+  await idle(view);
+  expect(server.requests).toHaveLength(2);
+  expect(server.trips.get(TRIP_A).title).toBe(`Trip to BCD, ${day(2099, 11, 7)}`);
+  expect(view.result.current.save.trip.title).toBe(`Trip to BCD, ${day(2099, 11, 7)}`);
+});
+
+it('shows the name the trip has now, after a rename from anywhere', async () => {
   const view = mount({ result: routeResult('reopened'), start: opened(TRIP_A, 'Mine') });
-  server.serverTitle = 'Renamed in My trips';
+  await act(async () => { await writer.update(TRIP_A, { title: 'Renamed in My trips' }); });
+  expect(view.result.current.save.trip.title).toBe('Renamed in My trips');
   act(() => { view.result.current.save.saveEdits(routeResult('reopened', 'mia')); });
-  await settle();
-  expect(view.result.current.trip.title).toBe('Mine');
+  await idle(view);
+  expect(server.trips.get(TRIP_A).title).toBe('Renamed in My trips');
 });

@@ -3,6 +3,7 @@ import { TextEncoder } from 'util';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import '@testing-library/jest-dom';
 import SavedTripsPanel, { canonicalSnapshot, readTrip } from './SavedTripsPanel';
+import createTripWriter from './tripWriter';
 
 beforeAll(() => {
   global.TextEncoder = TextEncoder;
@@ -20,7 +21,8 @@ const empty = () => response({ trips: [], next_cursor: null });
 const deferred = () => { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; };
 const authFor = (protectedRequest = jest.fn(async () => empty()), id = 'google:a', generation = 1) => ({ status: 'authenticated', profile: { id }, generation, protectedRequest });
 async function renderPanel(auth, props = {}) {
-  const view = render(<SavedTripsPanel auth={auth} onView={jest.fn()} {...props} />);
+  // Renames go through the account's trip writer, as in the app.
+  const view = render(<SavedTripsPanel auth={auth} writer={createTripWriter(() => auth)} onView={jest.fn()} {...props} />);
   await waitFor(() => expect(screen.queryByText('Loading saved trips…')).not.toBeInTheDocument());
   return view;
 }

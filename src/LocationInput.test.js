@@ -900,3 +900,94 @@ test('a trip deleted elsewhere keeps the planner on screen, and Retry saves the 
   expect(lastWrite().id).not.toBe(first);
   expect(server.trips.get(lastWrite().id).snapshot.inputs.arrive_by).toBe(`${today()}T18:45`);
 });
+
+test('a first save that fails after Start over shows Not saved with a working Retry once undone', async () => {
+  show(); fillTrip(1); fetch.mockResolvedValue(responseFor(1));
+  server.hold = true; server.fail = 1;
+  calculate();
+  await waitFor(() => expect(server.held).toHaveLength(1));
+  fireEvent.click(screen.getByRole('button', { name: 'Start over' }));
+  server.hold = false;
+  await settle(() => server.held.shift()());
+  fireEvent.click(screen.getByRole('button', { name: 'Undo' }));
+  expect(await screen.findByText('It is not in My trips yet.')).toBeInTheDocument();
+  await settle(() => fireEvent.click(screen.getByRole('button', { name: 'Retry' })));
+  await settled();
+  expect(server.trips.size).toBe(1);
+});
+
+test('a copy saved after Start over comes back with Undo, under its own name', async () => {
+  savedTrip(); show();
+  await viewTrip();
+  fireEvent.click(screen.getByRole('button', { name: 'Edit trip' }));
+  await screen.findByText('Editing', { exact: false });
+  server.hold = true;
+  fireEvent.click(screen.getByRole('button', { name: 'Save as new trip' }));
+  await waitFor(() => expect(server.held).toHaveLength(1));
+  fireEvent.click(screen.getByRole('button', { name: 'Start over' }));
+  server.hold = false;
+  await settle(() => server.held.shift()());
+  fireEvent.click(screen.getByRole('button', { name: 'Undo' }));
+  expect(await screen.findByRole('button', { name: /^Trip name: Copy of Friday dinner/ })).toBeInTheDocument();
+  expect(server.trips.size).toBe(2);
+});
+
+test('an edit waiting in one saved trip goes to that trip, even after another trip is opened', async () => {
+  savedTrip(); show();
+  await viewTrip();
+  const other = { ...JSON.parse(JSON.stringify(mockTrip.current)), id: '99999999-9999-4999-8999-999999999999', title: 'Beach day' };
+  server.trips.set(other.id, JSON.parse(JSON.stringify(other)));
+  server.hold = true;
+  await rename(/^Who is at pickup 1/, 'Who is at pickup 1', 'Mia');
+  await setTime('20:15');
+  mockTrip.current = other;
+  fireEvent.click(screen.getByRole('button', { name: 'My trips' }));
+  await settle(() => fireEvent.click(screen.getByRole('button', { name: 'Fixture views trip' })));
+  await screen.findByRole('heading', { name: 'Beach day' });
+  // The first edit fails, so nothing it saved points the next one back at the first trip.
+  server.hold = false; server.fail = 1;
+  while (server.held.length) await settle(() => server.held.shift()());
+  await waitFor(() => expect(server.writes).toHaveLength(2));
+  expect(server.writes.map((write) => write.id)).toEqual([TRIP_ID, TRIP_ID]);
+  expect(server.trips.get(TRIP_ID).snapshot.inputs.arrive_by).toBe(`${today()}T20:15`);
+  expect(server.trips.get(other.id)).toEqual(other);
+});
+
+test('Edit a copy waits for a change still being saved, so the copy has it', async () => {
+  savedTrip(); show();
+  await viewTrip();
+  server.hold = true;
+  await rename(/^Who is at pickup 1/, 'Who is at pickup 1', 'Mia');
+  fireEvent.click(screen.getByRole('button', { name: 'Edit a copy' }));
+  server.hold = false;
+  await settle(() => server.held.shift()());
+  expect(await screen.findByText('Editing', { exact: false })).toHaveTextContent('Editing Copy of Friday dinner');
+  const copy = server.writes.find((write) => write.method === 'POST');
+  expect(copy.body.snapshot.inputs.passengers[0].person).toBe('Mia');
+});
+
+test('a change saved after a new name in a saved trip keeps that name', async () => {
+  savedTrip(); show();
+  await viewTrip();
+  server.hold = true;
+  await rename(/^Trip name: Friday dinner/, 'Trip name', 'Dinner at BCD');
+  await setTime('20:15');
+  server.hold = false;
+  while (server.held.length) await settle(() => server.held.shift()());
+  await waitFor(() => expect(server.trips.get(TRIP_ID).snapshot.inputs.arrive_by).toBe(`${today()}T20:15`));
+  expect(server.trips.get(TRIP_ID).title).toBe('Dinner at BCD');
+  expect(screen.getByRole('heading', { name: 'Dinner at BCD' })).toBeInTheDocument();
+});
+
+test('Edit trip waits for a change still being saved, so the planner starts from it', async () => {
+  savedTrip(); show();
+  await viewTrip();
+  server.hold = true;
+  await rename(/^Who is at pickup 1/, 'Who is at pickup 1', 'Mia');
+  fireEvent.click(screen.getByRole('button', { name: 'Edit trip' }));
+  server.hold = false;
+  await settle(() => server.held.shift()());
+  expect(await screen.findByText('Editing', { exact: false })).toHaveTextContent('Editing Friday dinner');
+  expect(screen.getByRole('button', { name: /^Who is at pickup 1: Mia/ })).toBeInTheDocument();
+  expect(server.writes).toHaveLength(1);
+});

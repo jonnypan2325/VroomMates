@@ -1,6 +1,6 @@
 import { DRIVER_COLORS, arrivalTimes, clockMinutes, driverInk, driverName, driverSteps, formatClock, formatDuration, formatTripClock,
   formatTripDate, peopleText, routeLayers, viewedFirst,
-  seatsUsed, stepName, stepPerson, stopDetail, stopName } from './routeSteps';
+  seatsUsed, stepPerson, stopDetail, stopName } from './routeSteps';
 
 const point = (stop_id, place_id, extra = {}) => ({ stop_id, label: '', address: `${stop_id} Street, Irvine, CA`,
   coordinates: { lat: 1, lng: 1 }, source: { kind: 'google_places', place_id }, ...extra });
@@ -30,10 +30,10 @@ it('shows each person once at a shared pickup and falls back to the place when n
   const riders = [point('p1', 'mia', { person: 'Mia' }), point('p2', 'mia', { person: 'Alex' }), point('p3', 'mia', { person: 'Mia' })];
   const [, pickup, destination] = driverSteps(result(riders, ['p1', 'p2', 'p3']), 0);
   expect(stepPerson(pickup)).toMatch(/^Mia,? and Alex$/);
-  expect(stepName(destination)).toBe('end Street');
+  expect(stopName(destination.point)).toBe('end Street');
   const [, unnamed] = driverSteps(result([point('p1', 'uci')], ['p1']), 0);
   expect(stepPerson(unnamed)).toBe('');
-  expect(stepName(unnamed)).toBe('p1 Street');
+  expect(stopName(unnamed.point)).toBe('p1 Street');
 });
 
 it('names a driver by person, then by place, never by number', () => {
