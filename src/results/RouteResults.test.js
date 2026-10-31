@@ -1,8 +1,8 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { act, fireEvent, render, screen, within } from '@testing-library/react';
 import '@testing-library/jest-dom';
 import RouteResults from './RouteResults';
-import { driverSteps, formatClock } from './routeSteps';
+import { driverSteps, formatTripClock, formatTripDate } from './routeSteps';
 
 const point = (stop_id, place_id, extra = {}) => ({ stop_id, label: '', address: `${stop_id} Street, Irvine, CA`,
   coordinates: { lat: 1, lng: 1 }, source: { kind: 'google_places', place_id }, ...extra });
@@ -71,29 +71,6 @@ test('a lone driver\'s card is always open and its header is not a dimmed button
   expect(screen.getByText('2 of 3 seats', { exact: false })).toBeVisible();
   expect(screen.getByRole('button', { name: /^Who is at the start/ })).toBeInTheDocument();
   expect(screen.queryByText('Show all drivers')).not.toBeInTheDocument();
-});
-
-test('an arrive-by time replaces drive minutes with leaving and pickup times worked back from it', () => {
-  show({ selected: 0 });
-  expect(screen.getByText('Set a time to see when each driver leaves and reaches each pickup.')).toBeVisible();
-  expect(screen.queryByText(/^Leaves/)).not.toBeInTheDocument();
-  fireEvent.change(screen.getByLabelText('Arrive by'), { target: { value: '19:00' } });
-  expect(screen.getByText('Estimates use Google drive times, without traffic or time spent at pickups.')).toBeVisible();
-  expect(screen.getByText(`Leaves ${formatClock(1115)}`)).toBeVisible();
-  expect(screen.getByText(`about ${formatClock(1125)}`)).toBeVisible();
-  expect(screen.getByText(`Arrives ${formatClock(1140)}`)).toBeVisible();
-  expect(screen.getByRole('button', { name: /^Home/ })).toHaveTextContent(`leaves ${formatClock(1115)}`);
-  expect(screen.getByRole('button', { name: /^Tustin Market/ })).toHaveTextContent(`leaves ${formatClock(1115)}`);
-});
-
-test('arrival times wait for drive times, and a new route starts without an arrive-by time', () => {
-  const { rerender, routes, result } = show({ selected: 0, status: 'loading', legs: [] });
-  fireEvent.change(screen.getByLabelText('Arrive by'), { target: { value: '19:00' } });
-  expect(screen.getByText('Times appear once drive times load.')).toBeVisible();
-  expect(screen.queryByText(/^Leaves/)).not.toBeInTheDocument();
-  rerender(<RouteResults result={{ ...result, id: 'result-2' }} routes={routes} legs={LEGS} status="ready" selected={0}
-    onSelect={jest.fn()} onRetry={jest.fn()} />);
-  expect(screen.getByLabelText('Arrive by')).toHaveValue('');
 });
 
 test('names are added in place: the place shows until then and stays under the field while typing', async () => {
@@ -171,8 +148,7 @@ test('unavailable directions are a short warning whose Retry keeps focus on the 
   expect(onRetry).toHaveBeenCalled();
   await flushFrame();
   expect(screen.getByRole('heading', { name: 'Your route' })).toHaveFocus();
-  fireEvent.change(screen.getByLabelText('Arrive by'), { target: { value: '19:00' } });
-  expect(screen.getByText('Times need drive times from Google.')).toBeVisible();
+  expect(screen.queryByLabelText('Arrive by time')).not.toBeInTheDocument();
 });
 
 test('hands a route to a phone: Google Maps link, copied link and a QR code drawn in the page', async () => {
@@ -186,4 +162,122 @@ test('hands a route to a phone: Google Maps link, copied link and a QR code draw
   expect(screen.getByText('Link copied.')).toBeVisible();
   fireEvent.click(screen.getByRole('button', { name: 'QR code' }));
   expect(screen.getByRole('img', { name: "QR code for Home's route" })).toBeInTheDocument();
+});
+
+// The arrive-by time lives with the route: this wrapper saves what the fields send, as the planner does.
+function Planned({ initial = '', origin = 'reopened', status = 'ready', legs = LEGS, onSave = async () => {} }) {
+  const [result, setResult] = useState(() => {
+    const base = trip({ origin });
+    return initial ? { ...base, inputs: { ...base.inputs, arrive_by: initial } } : base;
+  });
+  const routes = result.inputs.drivers.map((_, index) => driverSteps(result, index));
+  const save = async (value) => {
+    await onSave(value);
+    setResult((current) => {
+      const { arrive_by: previous, ...rest } = current.inputs;
+      return { ...current, inputs: value ? { ...rest, arrive_by: value } : rest };
+    });
+  };
+  return <RouteResults result={result} routes={routes} legs={legs} status={status} selected={0} onSelect={() => {}}
+    onRetry={() => {}} onArriveBy={save} />;
+}
+const pad = (number) => String(number).padStart(2, '0');
+const today = () => { const now = new Date(); return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`; };
+const setDate = (value) => settle(() => fireEvent.change(screen.getByLabelText('Arrive by date'), { target: { value } }));
+const setTime = (value) => settle(() => fireEvent.change(screen.getByLabelText('Arrive by time'), { target: { value } }));
+
+test('a saved arrive-by shows its weekday and day, and works back leaving and pickup times', () => {
+  render(<Planned initial="2099-10-30T19:00" />);
+  expect(screen.getByText(formatTripDate('2099-10-30'))).toBeVisible();
+  expect(formatTripDate('2099-10-30')).not.toMatch(/2099/);
+  expect(screen.getByLabelText('Arrive by date')).toHaveValue('2099-10-30');
+  expect(screen.getByLabelText('Arrive by time')).toHaveValue('19:00');
+  expect(screen.getByText('Estimates use Google drive times, without traffic or time spent at pickups.')).toBeVisible();
+  expect(screen.getByText(`Leaves ${formatTripClock(1115, '2099-10-30')}`)).toBeVisible();
+  expect(screen.getByText(`about ${formatTripClock(1125, '2099-10-30')}`)).toBeVisible();
+  expect(screen.getByText(`Arrives ${formatTripClock(1140, '2099-10-30')}`)).toBeVisible();
+  expect(screen.getByRole('button', { name: /^Home/ })).toHaveTextContent(`leaves ${formatTripClock(1115, '2099-10-30')}`);
+});
+
+test('without an arrive-by the route asks for one and shows drive minutes', () => {
+  render(<Planned />);
+  expect(screen.getByText('Date')).toBeVisible();
+  expect(screen.getByText('Set a time to see when each driver leaves and reaches each pickup.')).toBeVisible();
+  expect(screen.queryByText(/^Leaves/)).not.toBeInTheDocument();
+  expect(screen.getByRole('button', { name: /^Home/ })).toHaveTextContent('25 min drive');
+});
+
+test('a time typed alone is for today; clearing either half clears the arrive-by', async () => {
+  const onSave = jest.fn(async () => {});
+  render(<Planned onSave={onSave} />);
+  await setTime('23:59');
+  expect(onSave).toHaveBeenLastCalledWith(`${today()}T23:59`);
+  expect(screen.getByLabelText('Arrive by date')).toHaveValue(today());
+  await setTime('');
+  expect(onSave).toHaveBeenLastCalledWith('');
+  await setDate('2099-10-30');
+  expect(onSave).toHaveBeenCalledTimes(2);
+  await setTime('19:00');
+  expect(onSave).toHaveBeenLastCalledWith('2099-10-30T19:00');
+  await setDate('');
+  expect(onSave).toHaveBeenLastCalledWith('');
+  expect(screen.getByText('Date')).toBeVisible();
+  expect(screen.getByLabelText('Arrive by time')).toHaveValue('');
+});
+
+test('a past arrive-by is allowed with a quiet note', () => {
+  render(<Planned initial="2000-01-01T08:00" />);
+  expect(screen.getByText('This time has passed.')).toBeVisible();
+  expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+});
+
+test('leaving times on the day before an early arrival name their day', () => {
+  // 25 minutes of driving to arrive at 00:10 means leaving at 23:45 the evening before.
+  render(<Planned initial="2099-11-02T00:10" />);
+  const leaving = formatTripClock(-15, '2099-11-02');
+  expect(leaving).toMatch(/^\S+ /);
+  expect(screen.getByText(`Leaves ${leaving}`)).toBeVisible();
+  expect(screen.getByText(`Arrives ${formatTripClock(10, '2099-11-02')}`)).toBeVisible();
+  expect(formatTripClock(10, '2099-11-02')).not.toMatch(/^\S+ \d/);
+});
+
+test('times wait for drive times', () => {
+  render(<Planned initial="2099-10-30T19:00" status="loading" legs={[]} />);
+  expect(screen.getByText('Times appear once drive times load.')).toBeVisible();
+  expect(screen.queryByText(/^Leaves/)).not.toBeInTheDocument();
+});
+
+test('an arrive-by that cannot be saved says so and puts the saved one back', async () => {
+  const onSave = jest.fn(async () => { throw new Error('The time was not saved. Check your connection and try again.'); });
+  render(<Planned initial="2099-10-30T19:00" onSave={onSave} />);
+  await setTime('20:15');
+  expect(screen.getByRole('alert')).toHaveTextContent('The time was not saved. Check your connection and try again.');
+  expect(screen.getByLabelText('Arrive by time')).toHaveValue('19:00');
+});
+
+test('a route just calculated starts on today, unsaved; a reopened one does not', async () => {
+  const onSave = jest.fn(async () => {});
+  const { unmount } = render(<Planned origin="calculated" onSave={onSave} />);
+  expect(screen.getByLabelText('Arrive by date')).toHaveValue(today());
+  expect(screen.getByText(formatTripDate(today()))).toBeVisible();
+  expect(screen.getByLabelText('Arrive by time')).toHaveValue('');
+  expect(screen.getByText('Set a time to see when each driver leaves and reaches each pickup.')).toBeVisible();
+  expect(onSave).not.toHaveBeenCalled();
+  // Cleared, the date stays empty for this route rather than coming back.
+  await setDate('');
+  expect(screen.getByText('Date')).toBeVisible();
+  expect(onSave).not.toHaveBeenCalled();
+  unmount();
+  render(<Planned origin="reopened" />);
+  expect(screen.getByLabelText('Arrive by date')).toHaveValue('');
+  expect(screen.getByText('Date')).toBeVisible();
+});
+
+test('the date field is keyboard reachable as the real date input', () => {
+  render(<Planned initial="2099-10-30T19:00" />);
+  const date = screen.getByLabelText('Arrive by date');
+  date.focus();
+  expect(date).toHaveFocus();
+  expect(date).toHaveAttribute('type', 'date');
+  expect(screen.getByRole('group', { name: 'Arrive by' })).toContainElement(date);
 });

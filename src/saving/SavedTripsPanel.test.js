@@ -58,7 +58,8 @@ it('a trip view that cannot resolve its places reports it and leaves the list us
   expect(screen.getByRole('alert')).toHaveTextContent('This trip could not be loaded');
   expect(screen.getByRole('button', { name: 'Open Team trip' })).toBeEnabled();
 });
-it.each(['wrong-id', 'coordinates', 'duplicate-pickup', 'bad-date', 'bad-location-id', 'destination-person', 'long-person'])(
+it.each(['wrong-id', 'coordinates', 'duplicate-pickup', 'bad-date', 'bad-location-id', 'destination-person', 'long-person',
+  'bad-arrive-by', 'arrive-by-on-a-stop'])(
   'never opens invalid detail %s', async kind => {
     const body = detail();
     const saved = body.trip.snapshot;
@@ -69,6 +70,8 @@ it.each(['wrong-id', 'coordinates', 'duplicate-pickup', 'bad-date', 'bad-locatio
     if (kind === 'bad-location-id') saved.inputs.passengers[0].location_id = 'saved-home';
     if (kind === 'destination-person') saved.inputs.destination.person = 'Sam';
     if (kind === 'long-person') saved.inputs.drivers[0].person = 'x'.repeat(81);
+    if (kind === 'bad-arrive-by') saved.inputs.arrive_by = '2026-02-30T10:00';
+    if (kind === 'arrive-by-on-a-stop') saved.inputs.drivers[0].arrive_by = '2026-10-30T19:00';
     const transport = jest.fn(async path => path === '/saved-trips?limit=20' ? listed() : response(body));
     const view = jest.fn(); await renderPanel(authFor(transport), { onView: view }); await click('Open Team trip');
     expect(view).not.toHaveBeenCalled(); expect(screen.getByRole('alert')).toHaveTextContent('could not be loaded');
@@ -286,4 +289,25 @@ test('a rename that lands after another trip opened leaves the newly opened trip
   view.rerender(<SavedTripsPanel auth={auth} onView={jest.fn()} onOpened={onOpened} openedTrip={{ id: OTHER_ID, title: 'Other trip', opened: true }} />);
   await act(async () => { rename.resolve(response(detail(ID, 'New name'))); });
   expect(onOpened).not.toHaveBeenCalled();
+});
+
+it('a trip with an arrive-by is listed by that full date; others keep their save date', async () => {
+  const timed = { ...summary(OTHER_ID, 'Friday dinner'), arrive_by: '2026-10-30T19:00' };
+  await renderPanel(authFor(jest.fn(async () => listed(summary(), timed))));
+  const full = new Date(2026, 9, 30).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+  const saved = new Date(stamp).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+  expect(screen.getByText(`1 driver · 1 passenger · arrive ${full}`)).toBeVisible();
+  expect(screen.getByText(`1 driver · 1 passenger · ${saved}`)).toBeVisible();
+});
+it.each([null, '', '2026-02-30T10:00', 3])('never lists a trip summary with a malformed arrive-by %s', async (bad) => {
+  await renderPanel(authFor(jest.fn(async () => listed({ ...summary(), arrive_by: bad }))));
+  expect(screen.getByRole('alert')).toHaveTextContent('My Trips could not be loaded');
+  expect(screen.queryByText('Team trip')).not.toBeInTheDocument();
+});
+it('opens a trip whose snapshot carries an arrive-by', async () => {
+  const body = detail(); body.trip.snapshot.inputs.arrive_by = '2026-10-30T19:00';
+  const onView = jest.fn(async () => {});
+  await renderPanel(authFor(jest.fn(async path => path === '/saved-trips?limit=20' ? listed() : response(body))), { onView });
+  await click('Open Team trip');
+  expect(onView.mock.calls[0][0].snapshot.inputs.arrive_by).toBe('2026-10-30T19:00');
 });

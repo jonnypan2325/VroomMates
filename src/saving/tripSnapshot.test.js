@@ -1,6 +1,6 @@
 import { TextEncoder } from 'util';
-import { expandPassengerPickups, freezeInputs, groupPassengerPickups, makeResult, nameChange, newPassengerPickup, renameInResult,
-  renamePoints, reopenSnapshot, resizePickup } from './tripSnapshot';
+import { arriveByChange, expandPassengerPickups, freezeInputs, groupPassengerPickups, makeResult, nameChange, newPassengerPickup,
+  renameInResult, renameInSnapshot, renamePoints, reopenSnapshot, resizePickup, validArriveBy } from './tripSnapshot';
 
 beforeAll(() => {
   global.TextEncoder = TextEncoder;
@@ -201,4 +201,40 @@ it('refuses to rename a destination that has moved until the route is calculated
   expect(nameChange({ stopIds: ['p1'] }, 'Mia', result)).toEqual({ stopIds: ['p1'], person: 'Mia' });
   expect(nameChange({ destination: true }, 'Dinner', { ...result, moved: ['d1'] })).toEqual({ destination: 'Dinner' });
   expect(() => nameChange({ stopIds: ['p1'] }, 'x'.repeat(81))).toThrow();
+});
+
+it('accepts an arrive-by only as a real local date and time from 2000 to 2100', () => {
+  ['2000-01-01T00:00', '2100-12-31T23:59', '2028-02-29T12:00', '2026-10-30T19:00'].forEach((value) => expect(validArriveBy(value)).toBe(true));
+  [undefined, null, '', 3, '2026-02-30T10:00', '2027-02-29T10:00', '2026-10-30T24:00', '2026-10-30T19:60', '2026-10-30T19:00:00',
+    '2026-10-30T19:00Z', '2026-10-30 19:00', '2026-1-30T19:00', '1999-12-31T23:59', '2101-01-01T00:00', '2026-10-30']
+    .forEach((value) => expect(validArriveBy(value)).toBe(false));
+  expect(arriveByChange('2026-10-30T19:00')).toEqual({ arriveBy: '2026-10-30T19:00' });
+  expect(arriveByChange('')).toEqual({ arriveBy: '' });
+  expect(() => arriveByChange('2026-02-30T10:00')).toThrow();
+});
+
+it('saves the arrive-by with the route and brings it back on reopening', async () => {
+  const inputs = { ...fixture(), arrive_by: '2026-10-30T19:00' };
+  const { snapshot } = makeResult(inputs, routesFor(inputs));
+  expect(snapshot.inputs.arrive_by).toBe('2026-10-30T19:00');
+  const reopened = await reopenSnapshot(snapshot, fresh, null);
+  expect(reopened.inputs.arrive_by).toBe('2026-10-30T19:00');
+  const plain = makeResult(fixture(), routesFor(fixture())).snapshot;
+  expect(plain.inputs).not.toHaveProperty('arrive_by');
+  expect((await reopenSnapshot(plain, fresh, null)).inputs).not.toHaveProperty('arrive_by');
+});
+
+it('changes or clears the arrive-by on a route and its snapshot without moving a stop', () => {
+  const result = makeResult(fixture(), routesFor(fixture()));
+  const timed = renameInResult(result, arriveByChange('2026-10-30T19:00'));
+  expect(timed.inputs.arrive_by).toBe('2026-10-30T19:00');
+  expect(timed.snapshot.inputs.arrive_by).toBe('2026-10-30T19:00');
+  expect(timed.coordinates).toBe(result.coordinates);
+  expect(timed.snapshot.routes).toEqual(result.snapshot.routes);
+  const cleared = renameInResult(timed, arriveByChange(''));
+  expect(cleared.inputs).not.toHaveProperty('arrive_by');
+  expect(cleared.snapshot.inputs).not.toHaveProperty('arrive_by');
+  // A name change leaves the arrive-by alone.
+  const named = renameInSnapshot(timed.snapshot, nameChange({ stopIds: ['p1'] }, 'Mia'), result.inputs.destination.source);
+  expect(named.inputs.arrive_by).toBe('2026-10-30T19:00');
 });

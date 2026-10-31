@@ -108,10 +108,10 @@ async function settle(fire) { await act(async () => { fire(); }); }
 const useSaved = (field) => settle(() => fireEvent.click(screen.getByRole('button', { name: `Use Home for ${field}` })));
 const saved = () => screen.findByText('Saved as', { exact: false });
 // After a save the status line settles on "Saved as"; waiting for it keeps later updates inside the test.
-const settled = () => waitFor(() => {
-  expect(screen.queryByText('Saving…')).not.toBeInTheDocument();
+async function settled() {
+  await waitFor(() => expect(screen.queryByText('Saving…')).not.toBeInTheDocument());
   expect(screen.getByText('Saved as', { exact: false })).toBeInTheDocument();
-});
+}
 const lastWrite = () => server.writes[server.writes.length - 1];
 // A lone driver's card header is plain text, not a button.
 const cardName = () => screen.getByText((_, element) => element.classList?.contains('driver-card-name'));
@@ -528,12 +528,12 @@ test('with no map yet drive times are loading, never unavailable; Maps without d
 // A saved trip whose driver was picked from My locations, which has since moved.
 const TRIP_ID = '55555555-5555-4555-8555-555555555555';
 const PLACES = { home: 1, 'new-home': 2, mia: 4, bcd: 9 };
-function savedTrip() {
+function savedTrip(arriveBy) {
   const source = (place_id) => ({ kind: 'google_places', place_id });
   const snapshot = { schema_version: 1, inputs: {
     drivers: [{ stop_id: 'd1', label: 'Home', source: source('home'), location_id: mockHome.id, capacity: 2 }],
     passengers: [{ stop_id: 'p1', label: '', source: source('mia') }],
-    destination: { stop_id: 'end', label: 'BCD Tofu', source: source('bcd') } },
+    destination: { stop_id: 'end', label: 'BCD Tofu', source: source('bcd') }, ...(arriveBy ? { arrive_by: arriveBy } : {}) },
   routes: [{ driver_id: 'd1', stop_ids: ['d1', 'p1', 'end'] }] };
   mockTrip.current = { id: TRIP_ID, title: 'Friday dinner', created_at: STAMP, snapshot };
   server.trips.set(TRIP_ID, JSON.parse(JSON.stringify(mockTrip.current)));
@@ -593,4 +593,62 @@ test('a trip open in the planner saves names from its read-only view through the
   expect(server.trips.size).toBe(1);
   fireEvent.click(screen.getByRole('tab', { name: 'Plan trip' }));
   expect(cardName()).toHaveTextContent('Jonathan from Home');
+});
+
+const pad = (number) => String(number).padStart(2, '0');
+const today = () => { const now = new Date(); return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`; };
+const setTime = (value) => settle(() => fireEvent.change(screen.getByLabelText('Arrive by time'), { target: { value } }));
+
+test('an arrive-by set on a calculated route starts on today, saves with the trip, and survives Recalculate and Undo', async () => {
+  show(); fillTrip(1); fetch.mockResolvedValue(responseFor(1)); calculate();
+  await saved();
+  expect(screen.getByLabelText('Arrive by date')).toHaveValue(today());
+  expect(screen.getByLabelText('Arrive by time')).toHaveValue('');
+  expect(server.writes[0].body.snapshot.inputs).not.toHaveProperty('arrive_by');
+  await setTime('23:30');
+  await waitFor(() => expect(lastWrite().body.snapshot.inputs.arrive_by).toBe(`${today()}T23:30`));
+  await settled();
+  calculate();
+  await waitFor(() => expect(server.writes).toHaveLength(3));
+  await settled();
+  expect(lastWrite()).toMatchObject({ method: 'PATCH' });
+  expect(lastWrite().body.snapshot.inputs.arrive_by).toBe(`${today()}T23:30`);
+  expect(screen.getByLabelText('Arrive by time')).toHaveValue('23:30');
+  fireEvent.click(screen.getByRole('button', { name: 'Start over' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Undo' }));
+  expect(screen.getByLabelText('Arrive by time')).toHaveValue('23:30');
+});
+
+test('a saved trip shows its arrive-by, saves a new time straight away, and keeps it in the planner', async () => {
+  savedTrip('2099-10-30T19:00'); show();
+  await viewTrip();
+  expect(screen.getByLabelText('Arrive by date')).toHaveValue('2099-10-30');
+  expect(screen.getByLabelText('Arrive by time')).toHaveValue('19:00');
+  await setTime('20:15');
+  expect(lastWrite()).toMatchObject({ method: 'PATCH', id: TRIP_ID });
+  expect(server.trips.get(TRIP_ID).snapshot.inputs.arrive_by).toBe('2099-10-30T20:15');
+  fireEvent.click(screen.getByRole('button', { name: 'Edit in planner' }));
+  expect(await screen.findByText('Editing', { exact: false })).toBeInTheDocument();
+  expect(screen.getByLabelText('Arrive by date')).toHaveValue('2099-10-30');
+  expect(screen.getByLabelText('Arrive by time')).toHaveValue('20:15');
+});
+
+test('a saved trip without an arrive-by opens without one, in the trip view and in the planner', async () => {
+  savedTrip(); show();
+  await viewTrip();
+  expect(screen.getByLabelText('Arrive by date')).toHaveValue('');
+  fireEvent.click(screen.getByRole('button', { name: 'Edit in planner' }));
+  expect(await screen.findByText('Editing', { exact: false })).toBeInTheDocument();
+  expect(screen.getByLabelText('Arrive by date')).toHaveValue('');
+  expect(server.writes).toHaveLength(0);
+});
+
+test('an arrive-by that cannot be saved in a saved trip says so and keeps the saved time', async () => {
+  savedTrip('2099-10-30T19:00'); show();
+  await viewTrip();
+  server.fail = 1;
+  await setTime('20:15');
+  expect(screen.getByRole('alert')).toHaveTextContent('The time was not saved. Check your connection and try again.');
+  expect(screen.getByLabelText('Arrive by time')).toHaveValue('19:00');
+  expect(server.trips.get(TRIP_ID).snapshot.inputs.arrive_by).toBe('2099-10-30T19:00');
 });

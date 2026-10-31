@@ -71,7 +71,9 @@ class FakeTripStore:
         summaries = [{'id': row['id'], 'title': row['title'], 'created_at': row['created_at'],
                       'schema_version': row['snapshot']['schema_version'],
                       'driver_count': len(row['snapshot']['inputs']['drivers']),
-                      'passenger_count': len(row['snapshot']['inputs']['passengers'])}
+                      'passenger_count': len(row['snapshot']['inputs']['passengers']),
+                      # The store keeps a copy of the arrive-by time beside each trip for the list.
+                      **({'arrive_by': row['snapshot']['inputs']['arrive_by']} if 'arrive_by' in row['snapshot']['inputs'] else {})}
                      for row in rows[:limit]]
         next_cursor = (summaries[-1]['created_at'], summaries[-1]['id']) if len(rows) > limit else None
         if self.override is not None:
@@ -392,6 +394,72 @@ class SavedTripTests(unittest.TestCase):
             obj['person'] = 'Sam'
             self.assert_error(self.call('POST', json=value), 400, 'INVALID_SNAPSHOT')
         self.assertEqual(self.store.calls, [])
+
+    def test_optional_arrive_by_round_trips_and_can_be_changed_or_removed(self):
+        value = payload()
+        value['snapshot']['inputs']['arrive_by'] = '2026-11-01T18:30'
+        response = self.call('POST', json=value)
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.json['trip']['snapshot']['inputs']['arrive_by'], '2026-11-01T18:30')
+        self.assertEqual(self.call('GET', '/saved-trips/' + value['id']).json['trip'], response.json['trip'])
+        later = copy.deepcopy(response.json['trip']['snapshot'])
+        later['inputs']['arrive_by'] = '2026-11-02T07:05'
+        result = self.call('PATCH', '/saved-trips/' + value['id'], json={'snapshot': later})
+        self.assertEqual(result.status_code, 200)
+        self.assertEqual(result.json['trip']['snapshot']['inputs']['arrive_by'], '2026-11-02T07:05')
+        del later['inputs']['arrive_by']
+        cleared = self.call('PATCH', '/saved-trips/' + value['id'], json={'snapshot': later})
+        self.assertNotIn('arrive_by', cleared.json['trip']['snapshot']['inputs'])
+        self.assertNotIn('arrive_by', validate_snapshot(payload()['snapshot'])['inputs'])
+
+    def test_arrive_by_is_a_real_local_date_and_time_in_one_exact_format(self):
+        for good in ['2000-01-01T00:00', '2100-12-31T23:59', '2028-02-29T12:00']:
+            value = payload(); value['snapshot']['inputs']['arrive_by'] = good
+            self.assertEqual(validate_snapshot(value['snapshot'])['inputs']['arrive_by'], good)
+        for bad in [None, '', 3, True, ['2026-11-01T18:30'], '2026-02-30T10:00', '2027-02-29T10:00',
+                    '2026-11-01T24:00', '2026-11-01T18:60', '2026-11-01T18:30:00', '2026-11-01T18:30Z',
+                    '2026-11-01T18:30+01:00', '2026-11-01 18:30', '2026-11-01t18:30', '2026-1-01T18:30',
+                    '2026-11-01T8:30', ' 2026-11-01T18:30', '2026-11-01T18:30 ', '1999-12-31T23:59',
+                    '2101-01-01T00:00', '٢٠٢٦-11-01T18:30', '2026-11-01']:
+            value = payload(); value['snapshot']['inputs']['arrive_by'] = bad
+            self.assert_error(self.call('POST', json=value), 400, 'INVALID_SNAPSHOT')
+        self.assertEqual(self.store.calls, [])
+
+    def test_arrive_by_only_in_inputs_and_other_fields_still_rejected(self):
+        for field in ['arriveBy', 'arrive_at', 'arrival', 'depart_at']:
+            value = payload(); value['snapshot']['inputs'][field] = '2026-11-01T18:30'
+            self.assert_error(self.call('POST', json=value), 400, 'INVALID_SNAPSHOT')
+        for target in ['snapshot', 'driver', 'passenger', 'destination', 'route']:
+            value = payload(); snap = value['snapshot']
+            obj = {'snapshot': snap, 'driver': snap['inputs']['drivers'][0], 'passenger': snap['inputs']['passengers'][0],
+                   'destination': snap['inputs']['destination'], 'route': snap['routes'][0]}[target]
+            obj['arrive_by'] = '2026-11-01T18:30'
+            self.assert_error(self.call('POST', json=value), 400, 'INVALID_SNAPSHOT')
+        self.assertEqual(self.store.calls, [])
+
+    def test_list_carries_the_arrive_by_time_only_for_trips_that_have_one(self):
+        timed, plain = payload(), payload()
+        timed['snapshot']['inputs']['arrive_by'] = '2026-10-30T19:00'
+        self.call('POST', json=timed); self.call('POST', json=plain)
+        listed = lambda: {row['id']: row for row in self.call('GET').json['trips']}
+        rows = listed()
+        self.assertEqual(rows[timed['id']]['arrive_by'], '2026-10-30T19:00')
+        self.assertNotIn('arrive_by', rows[plain['id']])
+        self.assertEqual(set(rows[plain['id']]), {'id', 'title', 'created_at', 'schema_version', 'driver_count', 'passenger_count'})
+        self.call('PATCH', '/saved-trips/' + timed['id'], json={'title': 'Friday dinner'})
+        self.assertEqual(listed()[timed['id']]['arrive_by'], '2026-10-30T19:00')
+        self.call('PATCH', '/saved-trips/' + timed['id'], json={'snapshot': payload(timed['id'])['snapshot']})
+        self.assertNotIn('arrive_by', listed()[timed['id']])
+
+    def test_a_malformed_listed_arrive_by_never_reaches_the_response(self):
+        value = payload(); value['snapshot']['inputs']['arrive_by'] = '2026-10-30T19:00'
+        self.call('POST', json=value)
+        summaries, _ = self.store.list_trips('google:synthetic-account-a', 50)
+        for bad in [None, '', 3, '2026-02-30T10:00', '2026-10-30T19:00Z', '2026-10-30 19:00', '1999-12-31T23:59']:
+            self.store.override = ([dict(summaries[0], arrive_by=bad)], None)
+            response = self.call('GET')
+            self.assert_error(response, 500, 'SAVED_TRIP_UNREADABLE')
+            self.assertNotIn('arrive_by', response.get_data(as_text=True))
 
     @staticmethod
     def named(person, target='passengers'):

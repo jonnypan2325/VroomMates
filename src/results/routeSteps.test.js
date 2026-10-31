@@ -1,4 +1,5 @@
-import { DRIVER_COLORS, arrivalTimes, clockMinutes, driverInk, driverName, driverSteps, formatClock, formatDuration, peopleText,
+import { DRIVER_COLORS, arrivalTimes, clockMinutes, driverInk, driverName, driverSteps, formatClock, formatDuration, formatTripClock,
+  formatTripDate, peopleText,
   seatsUsed, stepName, stepPerson, stopDetail, stopName } from './routeSteps';
 
 const point = (stop_id, place_id, extra = {}) => ({ stop_id, label: '', address: `${stop_id} Street, Irvine, CA`,
@@ -78,4 +79,14 @@ it('gives every driver colour readable numbers: white where it is 4.5:1, dark in
     const ink = driverInk(index) === '#fff' ? '#ffffff' : driverInk(index);
     expect(contrast(color, ink)).toBeGreaterThanOrEqual(4.5);
   });
+});
+
+it('dates a trip by weekday and day without the year, and names the day only before the arrive-by date', () => {
+  const friday = formatTripDate('2026-10-30');
+  expect(friday).toBe(new Date(2026, 9, 30).toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' }));
+  expect(friday).not.toMatch(/2026/);
+  expect(formatTripClock(1110, '2026-10-30')).toBe(formatClock(1110));
+  const sunday = new Date(2026, 10, 1).toLocaleDateString(undefined, { weekday: 'short' });
+  expect(formatTripClock(-20, '2026-11-02')).toBe(`${sunday} ${formatClock(-20)}`);
+  expect(formatTripClock(-20, '')).toBe(formatClock(-20));
 });

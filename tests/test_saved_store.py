@@ -216,6 +216,29 @@ class FirestoreStoreTests(unittest.TestCase):
         with self.assertRaises(SavedNotFound):
             self.store.update_trip(self.other, payload['id'], {'title': 'Theirs'})
 
+    def test_trip_list_keeps_a_copy_of_the_arrive_by_time(self):
+        payload = trip(); payload['snapshot']['inputs']['arrive_by'] = '2026-10-30T19:00'
+        self.store.create_trip(self.owner, payload)
+        self.store.create_trip(self.owner, trip())
+        rows = lambda: {row['id']: row for row in self.store.list_trips(self.owner, 5)[0]}
+        listed = rows()
+        self.assertEqual(listed[payload['id']]['arrive_by'], '2026-10-30T19:00')
+        self.assertEqual([row for ident, row in listed.items() if ident != payload['id'] and 'arrive_by' in row], [])
+        self.store.update_trip(self.owner, payload['id'], {'title': 'Friday dinner'})
+        self.assertEqual(rows()[payload['id']]['arrive_by'], '2026-10-30T19:00')
+        later = copy.deepcopy(payload['snapshot']); later['inputs']['arrive_by'] = '2026-10-31T08:15'
+        self.store.update_trip(self.owner, payload['id'], {'snapshot': later})
+        self.assertEqual(rows()[payload['id']]['arrive_by'], '2026-10-31T08:15')
+        del later['inputs']['arrive_by']
+        self.store.update_trip(self.owner, payload['id'], {'snapshot': later})
+        self.assertNotIn('arrive_by', rows()[payload['id']])
+        # A trip saved before the list kept this copy lists without it, though the trip itself still has one.
+        older = trip(); older['snapshot']['inputs']['arrive_by'] = '2026-11-01T18:30'
+        self.store.create_trip(self.owner, older)
+        self.store._account(self.owner).collection('trips').document(older['id']).update({'arrive_by': firestore.DELETE_FIELD})
+        self.assertNotIn('arrive_by', rows()[older['id']])
+        self.assertEqual(self.store.get_trip(self.owner, older['id'])['snapshot']['inputs']['arrive_by'], '2026-11-01T18:30')
+
     def assert_reservations_match(self):
         raw = self.store._account(self.owner).get().to_dict()
         rows = self.store.list_locations(self.owner)
