@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import AddressInput from './components/AddressInput';
 import SavedTripsPanel, { editedDate } from './saving/SavedTripsPanel';
-import { newId } from './saving/api';
+import { newId, sameData } from './saving/api';
 import InlineEdit from './saving/InlineEdit';
 import TripSaveStatus from './saving/TripSaveStatus';
 import useSavedLocations from './saving/useSavedLocations';
@@ -123,6 +123,7 @@ function TripView({ view, route, selected, onSelect, onRetry, onBack, onEdit, on
     setError('');
     try { await action(); } catch (failure) { setError(failure.message); throw failure; }
   };
+  const edit = (recalculate) => { attempt(() => onEdit(recalculate)).catch(() => { /* Shown above. */ }); };
   const copy = async () => {
     setCopying(true);
     try { await attempt(onCopy); } catch (_) { /* Shown above. */ } finally { setCopying(false); }
@@ -133,12 +134,12 @@ function TripView({ view, route, selected, onSelect, onRetry, onBack, onEdit, on
       My trips</button>
     <h2 aria-label={trip.title}><InlineEdit value={trip.title} label="Trip name" className="trip-view-title" onCommit={(next) => attempt(() => onTitle(next))} /></h2>
     <p className="saving-note trip-view-meta">{drivers} {drivers === 1 ? 'driver' : 'drivers'} · {people} {people === 1 ? 'passenger' : 'passengers'} · last edited {editedDate(trip)}</p>
-    {result.changed && <ChangedNotice result={result} busy={busy} onRecalculate={() => void onEdit(true)} />}
+    {result.changed && <ChangedNotice result={result} busy={busy} onRecalculate={() => edit(true)} />}
     <RouteResults result={result} routes={route.routes} legs={route.legs} status={route.status}
       selected={selected} onSelect={onSelect} onRetry={onRetry} onRename={onRename} onArriveBy={onArriveBy}>{saveStatus}</RouteResults>
     {error && <p className="saving-error" role="alert">{error}</p>}
     <div className="trip-view-actions">
-      <button type="button" className="secondary-button" disabled={busy} onClick={() => void onEdit(false)}>Edit trip</button>
+      <button type="button" className="secondary-button" disabled={busy} onClick={() => edit(false)}>Edit trip</button>
       <button type="button" className="text-button" disabled={busy} onClick={() => void copy()}>{copying ? 'Copying…' : 'Edit a copy'}</button>
     </div>
   </div>;
@@ -368,23 +369,33 @@ export default function LocationInput({ map, auth }) {
   };
   const endLoad = (captured) => { if (captured && current(captured)) setBusy(false); };
   // Opening a saved trip shows it read-only; its linked stops follow the owner's My locations.
-  const viewTrip = async (trip, captured) => {
-    if (!captured || !current(captured)) throw abortError();
+  // A saved route with its places looked up again; its linked stops follow the owner's My locations once known.
+  const restoreTrip = async (snapshot) => {
     const controller = new AbortController();
     controllers.current.add(controller);
-    setBusy(true);
     try {
       const saved = savedRef.current;
       const complete = saved && !saved.loading && !saved.error ? saved.locations : null;
-      const restored = await reopenSnapshot(trip.snapshot,
-        (placeId) => resolvePlace(map, placeId, { signal: controller.signal }), complete);
+      const restored = await reopenSnapshot(snapshot, (placeId) => resolvePlace(map, placeId, { signal: controller.signal }), complete);
+      return { restored, complete };
+    } finally { controllers.current.delete(controller); }
+  };
+  const viewTrip = async (trip, captured) => {
+    if (!captured || !current(captured)) throw abortError();
+    setBusy(true);
+    try {
+      let { restored, complete } = await restoreTrip(trip.snapshot);
       if (!current(captured)) throw abortError();
+      // The trip as last confirmed: this read, unless a save from here confirmed something newer meanwhile.
+      const kept = writerRef.current?.remember(trip) || trip;
+      if (!sameData(kept.snapshot, trip.snapshot)) {
+        ({ restored, complete } = await restoreTrip(kept.snapshot));
+        if (!current(captured)) throw abortError();
+      }
       privateOwner.current = captured.owner;
-      writerRef.current?.remember(trip);
-      setViewedTrip({ trip, result: restored, linksPending: !complete });
+      setViewedTrip({ trip: kept, result: restored, linksPending: !complete });
       scrollPane.current?.scrollTo({ top: 0 });
     } finally {
-      controllers.current.delete(controller);
       if (current(captured)) setBusy(false);
     }
   };
@@ -397,25 +408,52 @@ export default function LocationInput({ map, auth }) {
     latestView.current = update(latestView.current);
     setViewedTrip(update);
   };
-  const editInPlanner = async (recalculate, trip = null) => {
-    if (!viewedTrip) return;
-    const id = viewedTrip.trip.id;
-    await writerRef.current?.drain(id);
-    const view = latestView.current;
-    if (view?.trip.id !== id) return;
-    const target = trip || writerRef.current?.known(id) || view.trip;
-    const { result: restored } = view;
-    invalidate(); setError('');
-    setDrivers(restored.inputs.drivers);
-    setPassengers(groupPassengerPickups(restored.inputs.passengers));
-    setDestination(restored.inputs.destination);
-    setArriveBy(restored.inputs.arrive_by || '');
-    setResult(restored);
-    setOpenedTrip({ id: target.id, title: target.title, opened: true, created_at: target.created_at, facts: titleFacts(restored) });
+  // Both wait, busy, for the trip's saves; a save that confirmed meanwhile (from the planner, say) can be newer
+  // than the trip as opened, so the planner then starts from the trip as last confirmed. A copy passes the
+  // trip it was made from, so it opens even if the person went back meanwhile, unless something newer started.
+  // Going back from a trip while Edit trip waits ends the wait; a place that cannot load is reported.
+  const editLoad = useRef(null);
+  const editInPlanner = async (recalculate, trip = null, source = null) => {
+    const start = source || latestView.current;
+    if (!start) return;
+    const id = start.trip.id;
+    const captured = beginLoad();
+    if (!source) editLoad.current = captured;
+    const shown = () => source || (latestView.current?.trip.id === id ? latestView.current : null);
+    try {
+      // A copy is already confirmed, so only the trip itself is waited for.
+      if (!trip) await writerRef.current?.settled(id);
+      const view = shown();
+      if (!view || !current(captured)) return;
+      const confirmed = trip || writerRef.current?.known(id);
+      let restored = view.result;
+      if (confirmed && !sameData(confirmed.snapshot, view.result.snapshot)) {
+        ({ restored } = await restoreTrip(confirmed.snapshot));
+        if (!shown() || !current(captured)) return;
+      }
+      const target = confirmed || view.trip;
+      invalidate(); setError('');
+      setDrivers(restored.inputs.drivers);
+      setPassengers(groupPassengerPickups(restored.inputs.passengers));
+      setDestination(restored.inputs.destination);
+      setArriveBy(restored.inputs.arrive_by || '');
+      setResult(restored);
+      autoSave.hold(restored, target.id);
+      setOpenedTrip({ id: target.id, title: target.title, opened: true, created_at: target.created_at, facts: titleFacts(restored) });
+      setViewedTrip(null);
+      setActiveView('plan');
+      viewButtons.current.plan?.focus();
+      if (recalculate) setCalculateNext(true);
+    } catch (failure) {
+      if (failure.name !== 'AbortError' && current(captured)) throw new Error('This trip could not be loaded. Check place availability and try again.');
+    } finally {
+      if (editLoad.current === captured) editLoad.current = null;
+      endLoad(captured);
+    }
+  };
+  const closeView = () => {
     setViewedTrip(null);
-    setActiveView('plan');
-    viewButtons.current.plan?.focus();
-    if (recalculate) setCalculateNext(true);
+    if (editLoad.current) endLoad(editLoad.current);
   };
   // Names and the arrive-by time belong to this trip: the planner keeps them for the next calculation,
   // and the route stays as drawn.
@@ -479,20 +517,30 @@ export default function LocationInput({ map, auth }) {
     if (!view || !editor) return;
     const id = view.trip.id;
     const captured = beginLoad();
-    let copy;
-    try {
-      await editor.drain(id);
-      const source = editor.known(id) || view.trip;
-      const retry = copyRetry.current?.tripId === id ? copyRetry.current.retry : null;
-      copyRetry.current = null;
-      copy = await (retry ? retry() : editor.create({ id: newId(), title: copyTitle(source.title), snapshot: source.snapshot }));
-    } catch (error) {
-      if (error.retry) copyRetry.current = { tripId: id, retry: error.retry };
-      endLoad(captured);
-      throw new Error('The copy was not saved. Check your connection and try again.');
+    const earlier = copyRetry.current?.tripId === id ? copyRetry.current : null;
+    copyRetry.current = null;
+    let copy = earlier?.copy && editor.known(earlier.copy.id);
+    if (!copy) {
+      try {
+        if (earlier?.retry) copy = await earlier.retry();
+        else {
+          await editor.settled(id);
+          const source = editor.known(id) || view.trip;
+          copy = await editor.create({ id: newId(), title: copyTitle(source.title), snapshot: source.snapshot });
+        }
+      } catch (error) {
+        if (error.retry) copyRetry.current = { tripId: id, retry: error.retry };
+        endLoad(captured);
+        throw new Error('The copy was not saved. Check your connection and try again.');
+      }
+      setListVersion((version) => version + 1);
     }
-    setListVersion((version) => version + 1);
-    if (current(captured)) void editInPlanner(false, copy);
+    // Something newer has started: the copy is saved, and stays in My trips.
+    if (!current(captured)) return;
+    try { await editInPlanner(false, copy, view); } catch (failure) {
+      copyRetry.current = { tripId: id, copy };
+      throw failure;
+    }
   };
   // A new name here is the person's own, so a later arrive-by date leaves it as it is.
   const titleViewed = async (text) => {
@@ -537,7 +585,7 @@ export default function LocationInput({ map, auth }) {
   }, [activeView]);
 
   const navigate = (view, focus = false) => {
-    if (view !== 'trips') setViewedTrip(null);
+    if (view !== 'trips') closeView();
     setActiveView(view);
     if (focus) viewButtons.current[view]?.focus();
   };
@@ -693,7 +741,7 @@ export default function LocationInput({ map, auth }) {
             {viewedTrip && <TripView key={viewedTrip.trip.id} route={route}
               // The trip's name and dates as last confirmed, whoever changed them.
               view={{ ...viewedTrip, trip: writer?.known(viewedTrip.trip.id) || viewedTrip.trip }} selected={selected} onSelect={selectDriver} busy={busy}
-              onRetry={() => setMapAttempt((attempt) => attempt + 1)} onBack={() => setViewedTrip(null)} onEdit={editInPlanner}
+              onRetry={() => setMapAttempt((attempt) => attempt + 1)} onBack={closeView} onEdit={editInPlanner}
               onCopy={copyViewed} onTitle={titleViewed}
               onRename={renameViewed} onArriveBy={arriveViewed}
               // This trip is also in the planner, whose saves carry its names: a failed save shows here too, with Retry.

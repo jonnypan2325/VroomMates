@@ -1,8 +1,21 @@
 import { canonicalText } from './api';
 import { validArriveBy } from './tripSnapshot';
 
-const shortPlace = (point) => point.label || point.place_name || (point.address || '').split(',')[0].trim() || 'destination';
-const titleOf = (place, day) => canonicalText(`Trip to ${place}, ${day.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}`, 200, 200);
+// Place names come from Google as they are, and can hold invisible characters (a ZWNJ in Persian, a soft
+// hyphen) that a saved title may not; they are left out, so every place still makes a valid title.
+const visible = (text) => (text || '').replace(/\p{C}/gu, '').trim();
+const shortPlace = (point) => visible(point.label) || visible(point.place_name) || visible((point.address || '').split(',')[0]) || 'destination';
+// A long name is shortened until the title fits its 200-byte limit.
+function fitted(name, write) {
+  const encoder = new TextEncoder();
+  let letters = Array.from(name);
+  while (letters.length > 1 && encoder.encode(write(letters.join(''))).length > 200) letters = letters.slice(0, -1);
+  return canonicalText(write(letters.join('')), 200, 200);
+}
+function titleOf(place, day) {
+  const date = day.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+  return fitted(place, (name) => `Trip to ${name}, ${date}`);
+}
 // An arrive-by time is the destination's wall clock, so its date is read without a time zone.
 const arriveDay = (value) => new Date(Number(value.slice(0, 4)), Number(value.slice(5, 7)) - 1, Number(value.slice(8, 10)));
 
@@ -26,4 +39,4 @@ export function followTitle(title, before, after, createdAt) {
   return day ? titleOf(after.place, day) : title;
 }
 
-export const copyTitle = (title) => canonicalText(Array.from('Copy of ' + title).slice(0, 200).join(''), 200, 200);
+export const copyTitle = (title) => fitted(title, (name) => `Copy of ${name}`);
