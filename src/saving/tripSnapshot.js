@@ -1,6 +1,8 @@
 import { canonicalText, newId } from './api';
 import { hasCoordinates, hasPlaceSource } from './places';
 
+const LOCATION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+
 export const newPoint = () => ({
   stop_id: newId(), address: '', label: '', coordinates: { lat: null, lng: null }, source: null,
 });
@@ -40,7 +42,7 @@ export function expandPassengerPickups(rows) {
 export function groupPassengerPickups(people) {
   const groups = new Map();
   for (const point of people) {
-    const key = JSON.stringify([point.source?.kind, point.source?.place_id, point.label || '']);
+    const key = JSON.stringify([point.source?.kind, point.source?.place_id, point.label || '', point.person || '']);
     const group = groups.get(key);
     if (group) { group.count += 1; group.occurrenceIds.push(point.stop_id); }
     else groups.set(key, { ...point, count: 1, occurrenceIds: [point.stop_id] });
@@ -54,10 +56,13 @@ export const freezeInputs = (drivers, passengers, destination) =>
 const coordinateKey = (value) => JSON.stringify([value.lat, value.lng]);
 const equalCoordinates = (left, right) => left.lat === right.lat && left.lng === right.lng;
 
-function reference(point, driver = false) {
+function reference(point, driver = false, person = true) {
   if (!hasPlaceSource(point.source)) throw new Error('Choose a Google suggestion for every stop before saving.');
   return { stop_id: point.stop_id, label: canonicalText(point.label || '', 1000, 1000, true),
     source: { kind: 'google_places', place_id: point.source.place_id },
+    // A stop picked from My locations keeps that location's ID, so a reopened trip follows it.
+    ...(LOCATION_ID.test(point.saved_id || '') ? { location_id: point.saved_id } : {}),
+    ...(person && point.person ? { person: canonicalText(point.person, 80, 320) } : {}),
     ...(driver ? { capacity: point.capacity } : {}) };
 }
 
@@ -92,14 +97,20 @@ export function makeResult(inputs, routes) {
     snapshot = { schema_version: 1, inputs: {
       drivers: inputs.drivers.map((point) => reference(point, true)),
       passengers: inputs.passengers.map((point) => reference(point)),
-      destination: reference(inputs.destination),
+      destination: reference(inputs.destination, false, false),
     }, routes: assignments };
   } catch (error) { saveError = error.message; }
-  return { id: newId(), inputs, coordinates: routes.map((route) => route.map((point) => ({ lat: point.lat, lng: point.lng }))),
-    snapshot, saveError };
+  return { id: newId(), origin: 'calculated', inputs, assignments: assignments.map((route) => route.stop_ids),
+    coordinates: routes.map((route) => route.map((point) => ({ lat: point.lat, lng: point.lng }))), snapshot, saveError };
 }
 
-export async function reopenSnapshot(snapshot, lookup) {
+/**
+ * Resolves a saved trip with fresh place details. A stop linked to one of the owner's saved locations
+ * takes that location's current place and name; `locations` is the owner's complete list, or null
+ * while it is unknown. A link to a location that is not in the list (deleted, or never this owner's)
+ * falls back to the place and label stored with the trip.
+ */
+export async function reopenSnapshot(snapshot, lookup, locations = null) {
   if (snapshot?.schema_version !== 1 || !Array.isArray(snapshot.inputs?.drivers) ||
       !Array.isArray(snapshot.inputs?.passengers) || !Array.isArray(snapshot.routes)) {
     throw new Error('This saved route format is unavailable.');
@@ -112,15 +123,28 @@ export async function reopenSnapshot(snapshot, lookup) {
     }
     unique.set(point.stop_id, point);
   }
+  const saved = locations ? new Map(locations.map((row) => [row.id, row])) : null;
+  // Stops whose saved location now points at another place; the stored route still visits the old one.
+  const moved = [];
+  const linked = original.map((point) => {
+    const { location_id: locationId, ...stored } = point;
+    if (!locationId) return { ...stored, label: point.label || '', saved_id: null };
+    // Until the list is known, keep the link so the planner can still follow the location later.
+    if (!saved) return { ...stored, label: point.label || '', saved_id: locationId };
+    const row = saved.get(locationId);
+    if (!row) return { ...stored, label: point.label || '', saved_id: null };
+    if (row.source.place_id !== point.source.place_id) moved.push(point.stop_id);
+    return { ...stored, label: row.label, source: { ...row.source }, saved_id: row.id };
+  });
   const details = new Map();
-  original.forEach((point) => {
+  linked.forEach((point) => {
     if (!details.has(point.source.place_id)) details.set(point.source.place_id, lookup(point.source.place_id));
   });
   await Promise.all(details.values());
   const hydrated = new Map();
-  for (const point of original) {
+  for (const point of linked) {
     hydrated.set(point.stop_id, { ...point, ...await details.get(point.source.place_id),
-      label: point.label || '', source: { ...point.source } });
+      label: point.label, source: { ...point.source } });
   }
   const inputs = {
     drivers: snapshot.inputs.drivers.map((point) => hydrated.get(point.stop_id)),
@@ -150,5 +174,54 @@ export async function reopenSnapshot(snapshot, lookup) {
   });
   if (used.size !== passengerIds.size) throw new Error('This saved route omits a passenger.');
   // Preserve the stored occurrence assignment even when fresh coordinates become coincident.
-  return { id: newId(), inputs, coordinates: routes, snapshot: JSON.parse(JSON.stringify(snapshot)), saveError: '' };
+  return { id: newId(), origin: 'reopened', inputs, assignments: snapshot.routes.map((route) => [...route.stop_ids]),
+    coordinates: routes, snapshot: JSON.parse(JSON.stringify(snapshot)), saveError: '', changed: moved.length > 0, moved };
+}
+
+// Naming who drives or rides, or what this trip calls its destination, never moves a stop.
+const withPerson = (point, person) => {
+  const { person: previous, ...rest } = point;
+  return person ? { ...rest, person } : rest;
+};
+
+/** Planner rows and result stops; a pickup row matches through any of its people's stop IDs. */
+export function renamePoints(points, change) {
+  if (!change.stopIds) return points;
+  const ids = new Set(change.stopIds);
+  return points.map((point) => [point.stop_id, ...(point.occurrenceIds || [])].some((id) => ids.has(id))
+    ? withPerson(point, change.person) : point);
+}
+
+/** A renamed destination keeps its place but no longer follows a saved location, whose own name is unchanged. */
+export function renameDestination(point, change) {
+  return change.destination === undefined ? point : { ...point, label: change.destination, saved_id: null };
+}
+
+export function renameInSnapshot(snapshot, change, place) {
+  const { drivers, passengers, destination } = snapshot.inputs;
+  let renamed = destination;
+  if (change.destination !== undefined) {
+    const { location_id: link, ...rest } = destination;
+    // The place shown when renaming, which a reopened trip may have refreshed from the saved location.
+    renamed = { ...rest, label: change.destination, source: { kind: 'google_places', place_id: place.place_id } };
+  }
+  return { ...snapshot, inputs: { drivers: renamePoints(drivers, change), passengers: renamePoints(passengers, change),
+    destination: renamed } };
+}
+
+/** The same route under new names: assignments and coordinates are kept, so the map draws it without asking again. */
+export function renameInResult(result, change) {
+  const { drivers, passengers, destination } = result.inputs;
+  return { ...result, inputs: { drivers: renamePoints(drivers, change), passengers: renamePoints(passengers, change),
+    destination: renameDestination(destination, change) },
+  snapshot: result.snapshot && renameInSnapshot(result.snapshot, change, destination.source) };
+}
+
+/** A typed name as stored: trimmed and composed; empty clears it. */
+export function nameChange(target, text, result) {
+  if (target.destination && result?.moved?.includes(result.inputs.destination.stop_id)) {
+    throw new Error('This destination has moved. Recalculate before renaming it.');
+  }
+  const name = canonicalText(text, 80, 320, true);
+  return target.destination ? { destination: name } : { stopIds: target.stopIds, person: name };
 }
