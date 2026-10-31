@@ -15,13 +15,14 @@ jest.mock('./saving/useSavedLocations', () => () => ({
 const mockTrip = { current: null };
 jest.mock('./saving/SavedTripsPanel', () => {
   const actual = jest.requireActual('./saving/SavedTripsPanel');
-  function TripBoundary({ openedTrip, onOpened, onView, onBeginLoad, onEndLoad, viewing, children }) {
+  function TripBoundary({ openedTrip, onOpened, onView, onBeginLoad, onEndLoad, viewing, writer, children }) {
     const view = async () => {
       const token = onBeginLoad();
       try { await onView(mockTrip.current, token); } finally { onEndLoad(token); }
     };
     return <><button type="button" onClick={() => onOpened({ id: 'fixture-trip', title: 'Friday dinner', opened: true })}>Fixture opens trip</button>
       <button type="button" onClick={() => { view().catch(() => {}); }}>Fixture views trip</button>
+      <button type="button" onClick={() => { writer.forget(openedTrip.id); onOpened(null); }}>Fixture deletes held trip</button>
       <output data-testid="opened-trip">{openedTrip ? openedTrip.title : ''}</output>
       {viewing && children}</>;
   }
@@ -45,18 +46,22 @@ beforeAll(() => {
 const deferred = () => { let resolve; const promise = new Promise((yes) => { resolve = yes; }); return { promise, resolve }; };
 const STAMP = '2026-10-29T12:00:00Z';
 const reply = (status, body) => ({ ok: status >= 200 && status < 300, status, json: async () => body });
-// Saved trips in memory, answering like the API; `fail` rejects that many writes with 503, and `hold` keeps replies back.
+// Saved trips in memory, answering like the API; `fail` rejects that many writes with 503, `lose` saves that many
+// writes but loses their replies, `refuse` answers that many writes with 400, `failReads` loses that many reads of a
+// trip, `unreadable` loses every read of that trip, and `hold` keeps replies back.
 function tripServer() {
-  const server = { trips: new Map(), writes: [], fail: 0, hold: false, held: [] };
-  server.protectedRequest = jest.fn(async (path, options = {}) => {
+  const server = { trips: new Map(), writes: [], fail: 0, refuse: 0, lose: 0, failReads: 0, hold: false, held: [] };
+  const answer = async (path, options = {}) => {
     if (server.hold) await new Promise((resolve) => server.held.push(resolve));
     const method = options.method || 'GET';
     const body = options.body ? JSON.parse(options.body) : null;
     const id = path.split('?')[0].split('/')[2];
     if (method !== 'GET') server.writes.push({ method, id: id || body.id, body });
     if (method !== 'GET' && server.fail > 0) { server.fail -= 1; return reply(503, { error: { code: 'STORE_UNAVAILABLE' } }); }
+    if (method !== 'GET' && server.refuse > 0) { server.refuse -= 1; return reply(400, { error: { code: 'INVALID' } }); }
     if (method === 'POST') {
-      const trip = { id: body.id, title: body.title, created_at: STAMP, snapshot: body.snapshot };
+      // Dated now, like the API: a new trip's automatic name is dated by the day it was made.
+      const trip = { id: body.id, title: body.title, created_at: new Date().toISOString(), snapshot: body.snapshot };
       server.trips.set(trip.id, trip);
       return reply(201, { trip });
     }
@@ -68,6 +73,14 @@ function tripServer() {
     }
     if (id) return trip ? reply(200, { trip }) : reply(404, { error: { code: 'NOT_FOUND' } });
     return reply(200, { trips: [], next_cursor: null });
+  };
+  server.protectedRequest = jest.fn(async (path, options = {}) => {
+    const answered = await answer(path, options);
+    if ((options.method || 'GET') !== 'GET' && server.lose > 0) { server.lose -= 1; throw new TypeError('Reply lost'); }
+    const read = (options.method || 'GET') === 'GET' && path.split('/')[2];
+    if (read && server.failReads > 0) { server.failReads -= 1; throw new TypeError('Reply lost'); }
+    if (read && read === server.unreadable) throw new TypeError('Reply lost');
+    return answered;
   });
   return server;
 }
@@ -107,17 +120,15 @@ const calculate = () => fireEvent.click(calculateButton());
 // A saved choice starts an async place lookup; async act settles it before assertions.
 async function settle(fire) { await act(async () => { fire(); }); }
 const useSaved = (field) => settle(() => fireEvent.click(screen.getByRole('button', { name: `Use Home for ${field}` })));
-// "Saved as" can show while the save still reads "Saving…"; waiting for both keeps its last update inside the test.
+// "Saved as" can show while the save still reads "Saving…". One wait for both keeps the save's last update
+// inside the test: between two waits, it could land outside either.
 async function saved() {
-  const line = await screen.findByText('Saved as', { exact: false });
-  await waitFor(() => expect(screen.queryByText('Saving…')).not.toBeInTheDocument());
-  return line;
+  const done = () => Boolean(screen.queryByText('Saved as', { exact: false })) && !screen.queryByText('Saving…');
+  await waitFor(() => expect(done()).toBe(true));
+  return screen.getByText('Saved as', { exact: false });
 }
 // After a save the status line settles on "Saved as"; waiting for it keeps later updates inside the test.
-async function settled() {
-  await waitFor(() => expect(screen.queryByText('Saving…')).not.toBeInTheDocument());
-  expect(screen.getByText('Saved as', { exact: false })).toBeInTheDocument();
-}
+const settled = saved;
 const lastWrite = () => server.writes[server.writes.length - 1];
 // A lone driver's card header is plain text, not a button.
 const cardName = () => screen.getByText((_, element) => element.classList?.contains('driver-card-name'));
@@ -729,7 +740,7 @@ test('a saved trip renames in place, straight away, shows when it was last edite
 test('renaming a trip the planner holds goes through its saves and shows in Editing and Saved as', async () => {
   savedTrip(); show();
   await viewTrip();
-  fireEvent.click(screen.getByRole('button', { name: 'Edit trip' }));
+  await settle(() => fireEvent.click(screen.getByRole('button', { name: 'Edit trip' })));
   await screen.findByText('Editing', { exact: false });
   await viewTrip();
   await rename(/^Trip name: Friday dinner/, 'Trip name', 'Dinner at BCD');
@@ -919,7 +930,7 @@ test('a first save that fails after Start over shows Not saved with a working Re
 test('a copy saved after Start over comes back with Undo, under its own name', async () => {
   savedTrip(); show();
   await viewTrip();
-  fireEvent.click(screen.getByRole('button', { name: 'Edit trip' }));
+  await settle(() => fireEvent.click(screen.getByRole('button', { name: 'Edit trip' })));
   await screen.findByText('Editing', { exact: false });
   server.hold = true;
   fireEvent.click(screen.getByRole('button', { name: 'Save as new trip' }));
@@ -991,3 +1002,657 @@ test('Edit trip waits for a change still being saved, so the planner starts from
   expect(screen.getByRole('button', { name: /^Who is at pickup 1: Mia/ })).toBeInTheDocument();
   expect(server.writes).toHaveLength(1);
 });
+
+test('a destination whose name has hidden characters or is very long still saves under a readable name', async () => {
+  show(); fillTrip(1); fill('Destination', 'Kafe‌ye Nadiri, Tehran'); fetch.mockResolvedValue(responseFor(1)); calculate();
+  await saved();
+  expect(server.writes[0].body.title).toBe(`Trip to Kafeye Nadiri, ${dayOf(new Date())}`);
+  fireEvent.click(screen.getByRole('button', { name: 'Start over' }));
+  fillTrip(1); fill('Destination', '東'.repeat(80)); calculate();
+  await waitFor(() => expect(server.writes).toHaveLength(2));
+  await settled();
+  expect(new TextEncoder().encode(server.writes[1].body.title).length).toBeLessThanOrEqual(200);
+  expect(server.writes[1].body.title).toMatch(/^Trip to 東+, /);
+});
+
+test('a trip edited on another device opens with that edit, and the next change keeps it', async () => {
+  savedTrip(); show();
+  await viewTrip();
+  fireEvent.click(screen.getByRole('button', { name: 'My trips' }));
+  const elsewhere = JSON.parse(JSON.stringify(server.trips.get(TRIP_ID)));
+  elsewhere.title = 'Renamed on the phone';
+  elsewhere.updated_at = '2026-10-30T09:00:00Z';
+  elsewhere.snapshot.inputs.passengers[0].person = 'Mia';
+  server.trips.set(TRIP_ID, JSON.parse(JSON.stringify(elsewhere)));
+  mockTrip.current = elsewhere;
+  await settle(() => fireEvent.click(screen.getByRole('button', { name: 'Fixture views trip' })));
+  expect(await screen.findByRole('heading', { name: 'Renamed on the phone' })).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: /^Who is at pickup 1: Mia/ })).toBeInTheDocument();
+  await setTime('20:15');
+  expect(server.trips.get(TRIP_ID)).toMatchObject({ title: 'Renamed on the phone',
+    snapshot: { inputs: { arrive_by: `${today()}T20:15`, passengers: [{ person: 'Mia' }] } } });
+});
+
+test('Edit trip starts from a planner save that landed while it waited, not the trip as first opened', async () => {
+  savedTrip(); show();
+  await viewTrip();
+  await settle(() => fireEvent.click(screen.getByRole('button', { name: 'Edit trip' })));
+  await screen.findByText('Editing', { exact: false });
+  server.hold = true;
+  await setTime('20:15');
+  await waitFor(() => expect(server.held).toHaveLength(1));
+  await viewTrip();
+  fireEvent.click(screen.getByRole('button', { name: 'Edit trip' }));
+  // Waiting for the save still on its way: both choices wait too.
+  expect(screen.getByRole('button', { name: 'Edit trip' })).toBeDisabled();
+  expect(screen.getByRole('button', { name: 'Edit a copy' })).toBeDisabled();
+  server.hold = false;
+  await settle(() => server.held.shift()());
+  await screen.findByText('Editing', { exact: false });
+  await waitFor(() => expect(screen.getByLabelText('Arrive by time')).toHaveValue('20:15'));
+  expect(server.trips.get(TRIP_ID).snapshot.inputs.arrive_by).toBe(`${today()}T20:15`);
+});
+
+test('going back while a copy saves still opens the copy, and leaves nothing busy', async () => {
+  savedTrip(); show();
+  await viewTrip();
+  server.hold = true;
+  fireEvent.click(screen.getByRole('button', { name: 'Edit a copy' }));
+  await waitFor(() => expect(server.held).toHaveLength(1));
+  fireEvent.click(screen.getByRole('button', { name: 'My trips' }));
+  server.hold = false;
+  await settle(() => server.held.shift()());
+  expect(await screen.findByText('Editing', { exact: false })).toHaveTextContent('Editing Copy of Friday dinner');
+  expect(calculateButton()).not.toBeDisabled();
+});
+
+// A saved trip open in its view, over a planner route whose save failed.
+async function unsavedRoute() {
+  savedTrip(); show(); fillTrip(1); fetch.mockResolvedValue(responseFor(1));
+  server.fail = 1;
+  calculate();
+  await screen.findByRole('button', { name: 'Retry' });
+  await viewTrip();
+}
+const askedFirst = () => screen.findByRole('group', { name: "Your current route isn't saved." });
+const pressIn = (name) => settle(() => fireEvent.click(screen.getByRole('button', { name })));
+
+test('Edit trip over a route whose save failed asks first, and Cancel changes nothing', async () => {
+  await unsavedRoute();
+  const writes = server.writes.length;
+  await pressIn('Edit trip');
+  expect(await askedFirst()).toHaveFocus();
+  expect(screen.queryByText('Editing', { exact: false })).not.toBeInTheDocument();
+  await pressIn('Cancel');
+  expect(screen.queryByRole('group', { name: "Your current route isn't saved." })).not.toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Edit trip' })).toHaveFocus();
+  expect(screen.getByRole('heading', { name: 'Friday dinner' })).toBeInTheDocument();
+  fireEvent.click(screen.getByRole('tab', { name: 'Plan trip' }));
+  expect(screen.getByRole('button', { name: 'Retry' })).toBeInTheDocument();
+  expect(server.writes).toHaveLength(writes);
+});
+
+test('Replace it carries on with Edit trip and drops the unsaved route', async () => {
+  await unsavedRoute();
+  const writes = server.writes.length;
+  await pressIn('Edit trip');
+  await askedFirst();
+  await pressIn('Replace it');
+  expect(await screen.findByText('Editing', { exact: false })).toHaveTextContent('Editing Friday dinner');
+  await saved();
+  expect(screen.queryByRole('button', { name: 'Retry' })).not.toBeInTheDocument();
+  expect(server.writes).toHaveLength(writes);
+  expect(server.trips.size).toBe(1);
+});
+
+test('Retry save saves the route, then carries on with Edit trip', async () => {
+  await unsavedRoute();
+  await pressIn('Edit trip');
+  await askedFirst();
+  await pressIn('Retry save');
+  expect(await screen.findByText('Editing', { exact: false })).toHaveTextContent('Editing Friday dinner');
+  await saved();
+  expect(server.trips.size).toBe(2);
+});
+
+test('a Retry save that fails stays with the question, and can be pressed again', async () => {
+  await unsavedRoute();
+  await pressIn('Edit trip');
+  await askedFirst();
+  server.fail = 1;
+  await pressIn('Retry save');
+  expect(await askedFirst()).toHaveFocus();
+  expect(screen.getByRole('button', { name: 'Retry save' })).not.toBeDisabled();
+  expect(screen.queryByText('Editing', { exact: false })).not.toBeInTheDocument();
+  await pressIn('Retry save');
+  expect(await screen.findByText('Editing', { exact: false })).toHaveTextContent('Editing Friday dinner');
+  expect(server.trips.size).toBe(2);
+});
+
+test('Edit a copy over a route whose save failed asks before it makes the copy', async () => {
+  await unsavedRoute();
+  const writes = server.writes.length;
+  await pressIn('Edit a copy');
+  await askedFirst();
+  expect(server.writes).toHaveLength(writes);
+  await pressIn('Cancel');
+  expect(server.writes).toHaveLength(writes);
+  await pressIn('Edit a copy');
+  await askedFirst();
+  await pressIn('Replace it');
+  expect(await screen.findByText('Editing', { exact: false })).toHaveTextContent('Editing Copy of Friday dinner');
+  expect(server.trips.size).toBe(2);
+});
+
+test('a save that fails while Edit trip waits for it still asks first', async () => {
+  savedTrip(); show(); fillTrip(1); fetch.mockResolvedValue(responseFor(1));
+  server.hold = true; server.fail = 1;
+  calculate();
+  await waitFor(() => expect(server.held).toHaveLength(1));
+  await viewTrip();
+  await pressIn('Edit trip');
+  expect(screen.queryByText('Editing', { exact: false })).not.toBeInTheDocument();
+  server.hold = false;
+  await settle(() => server.held.shift()());
+  expect(await askedFirst()).toHaveFocus();
+  expect(screen.queryByText('Editing', { exact: false })).not.toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'Edit trip' })).not.toBeInTheDocument();
+});
+
+test('a save that fails while Edit a copy runs asks first, leaves nothing busy, and makes one copy', async () => {
+  savedTrip(); show(); fillTrip(1); fetch.mockResolvedValue(responseFor(1));
+  server.hold = true; server.fail = 1;
+  calculate();
+  await waitFor(() => expect(server.held).toHaveLength(1));
+  await viewTrip();
+  await pressIn('Edit a copy');
+  await waitFor(() => expect(server.held).toHaveLength(2));
+  server.hold = false;
+  await settle(() => server.held.shift()());
+  await settle(() => server.held.shift()());
+  expect(await askedFirst()).toHaveFocus();
+  expect(document.querySelector('.submit-btn')).not.toBeDisabled();
+  expect(screen.getByRole('button', { name: 'Replace it' })).toBeEnabled();
+  await pressIn('Replace it');
+  expect(await screen.findByText('Editing', { exact: false })).toHaveTextContent('Editing Copy of Friday dinner');
+  expect(server.trips.size).toBe(2);
+});
+
+const askedCannot = () => screen.findByRole('group', { name: "Your current route can't be saved." });
+async function refusedRoute() {
+  savedTrip(); show(); fillTrip(1); fetch.mockResolvedValue(responseFor(1));
+  server.refuse = 1;
+  calculate();
+  await screen.findByText(/cannot be saved/);
+  await viewTrip();
+}
+
+test('a route that cannot be saved is not replaced unasked, and offers no Retry save', async () => {
+  await refusedRoute();
+  await pressIn('Edit trip');
+  expect(await askedCannot()).toHaveFocus();
+  expect(screen.queryByRole('button', { name: 'Retry save' })).not.toBeInTheDocument();
+  await pressIn('Cancel');
+  expect(screen.getByRole('button', { name: 'Edit trip' })).toHaveFocus();
+  expect(screen.queryByText('Editing', { exact: false })).not.toBeInTheDocument();
+  await pressIn('Edit a copy');
+  await askedCannot();
+  expect(server.trips.size).toBe(1);
+  await pressIn('Cancel');
+  await pressIn('Edit trip');
+  await askedCannot();
+  await pressIn('Replace it');
+  expect(await screen.findByText('Editing', { exact: false })).toHaveTextContent('Editing Friday dinner');
+});
+
+test('a Retry save the server refuses changes the question and takes Retry save away', async () => {
+  await unsavedRoute();
+  await pressIn('Edit trip');
+  await askedFirst();
+  server.refuse = 1;
+  await pressIn('Retry save');
+  expect(await askedCannot()).toHaveFocus();
+  expect(screen.queryByRole('button', { name: 'Retry save' })).not.toBeInTheDocument();
+});
+
+test('a route saved normally is replaced without asking', async () => {
+  savedTrip(); show(); fillTrip(1); fetch.mockResolvedValue(responseFor(1));
+  calculate();
+  await saved();
+  await viewTrip();
+  await pressIn('Edit trip');
+  expect(await screen.findByText('Editing', { exact: false })).toHaveTextContent('Editing Friday dinner');
+  await saved();
+  expect(screen.queryByRole('group', { name: /^Your current route/ })).not.toBeInTheDocument();
+});
+
+// A route whose trip was deleted from My trips: it shows "Not saved. Save this trip", with no save having failed.
+async function routeOfDeletedTrip() {
+  savedTrip(); show(); fillTrip(1); fetch.mockResolvedValue(responseFor(1));
+  calculate();
+  await saved();
+  fireEvent.click(screen.getByRole('tab', { name: 'My trips' }));
+  await pressIn('Fixture deletes held trip');
+  await viewTrip();
+}
+
+test('a route whose trip was deleted is not replaced unasked, and Save this trip saves it first', async () => {
+  await routeOfDeletedTrip();
+  const posts = () => server.writes.filter((write) => write.method === 'POST');
+  await pressIn('Edit trip');
+  expect(await askedFirst()).toHaveFocus();
+  expect(screen.queryByRole('button', { name: 'Retry save' })).not.toBeInTheDocument();
+  await pressIn('Cancel');
+  expect(posts()).toHaveLength(1);
+  await pressIn('Edit a copy');
+  await askedFirst();
+  expect(posts()).toHaveLength(1);
+  await pressIn('Save this trip');
+  expect(await screen.findByText('Editing', { exact: false })).toHaveTextContent('Editing Copy of Friday dinner');
+  expect(posts()).toHaveLength(3);
+});
+
+test('a Save this trip that fails stays with the question, and Replace it still carries on', async () => {
+  await routeOfDeletedTrip();
+  await pressIn('Edit trip');
+  await askedFirst();
+  server.fail = 1;
+  await pressIn('Save this trip');
+  expect(await askedFirst()).toHaveFocus();
+  expect(screen.queryByText('Editing', { exact: false })).not.toBeInTheDocument();
+  await pressIn('Replace it');
+  expect(await screen.findByText('Editing', { exact: false })).toHaveTextContent('Editing Friday dinner');
+});
+
+const LOST = 'The change to Friday dinner was not saved. Check your connection and try again.';
+async function failingName() {
+  savedTrip(); show();
+  await viewTrip();
+  server.hold = true; server.fail = 1;
+  await rename(/^Who is at pickup 1/, 'Who is at pickup 1', 'Mia');
+  await waitFor(() => expect(server.held).toHaveLength(1));
+}
+const release = async () => { server.hold = false; await settle(() => server.held.shift()()); };
+
+test('an edit that fails after going back says so, naming the trip', async () => {
+  await failingName();
+  fireEvent.click(screen.getByRole('button', { name: 'My trips' }));
+  await release();
+  expect(await screen.findByText(LOST)).toBeInTheDocument();
+});
+
+test('an edit that fails after leaving for the planner says so there too', async () => {
+  await failingName();
+  fireEvent.click(screen.getByRole('tab', { name: 'Plan trip' }));
+  await release();
+  expect(await screen.findByText(LOST)).toBeVisible();
+});
+
+test('a new name that fails after going back says so too', async () => {
+  savedTrip(); show();
+  await viewTrip();
+  server.hold = true; server.fail = 1;
+  await rename(/^Trip name: Friday dinner/, 'Trip name', 'Dinner at BCD');
+  await waitFor(() => expect(server.held).toHaveLength(1));
+  fireEvent.click(screen.getByRole('button', { name: 'My trips' }));
+  await release();
+  expect(await screen.findByText(LOST)).toBeInTheDocument();
+});
+
+test('Edit trip stops at an edit that failed while it waited, and a second press carries on', async () => {
+  await failingName();
+  fireEvent.click(screen.getByRole('button', { name: 'Edit trip' }));
+  await release();
+  expect(await screen.findAllByText(LOST)).not.toHaveLength(0);
+  expect(screen.queryByText('Editing', { exact: false })).not.toBeInTheDocument();
+  expect(screen.getByRole('heading', { name: 'Friday dinner' })).toBeInTheDocument();
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Edit trip' })).toBeEnabled());
+  await pressIn('Edit trip');
+  expect(await screen.findByText('Editing', { exact: false })).toHaveTextContent('Editing Friday dinner');
+});
+
+test('Edit a copy stops at an edit that failed while it waited, and makes no copy', async () => {
+  await failingName();
+  fireEvent.click(screen.getByRole('button', { name: 'Edit a copy' }));
+  await release();
+  expect(await screen.findAllByText(LOST)).not.toHaveLength(0);
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Edit a copy' })).toBeEnabled());
+  expect(server.writes.filter((write) => write.method === 'POST')).toHaveLength(0);
+  expect(screen.queryByText('Editing', { exact: false })).not.toBeInTheDocument();
+});
+
+test('names and the arrive-by time cannot change while a route is calculating', async () => {
+  show(); fillTrip(1); fetch.mockResolvedValue(responseFor(1));
+  calculate();
+  await saved();
+  const results = screen.getByRole('region', { name: 'Route' });
+  expect(results.closest('[inert]')).toBeNull();
+  let answer;
+  fetch.mockReturnValue(new Promise((resolve) => { answer = resolve; }));
+  calculate();
+  expect(screen.getByRole('region', { name: 'Route' }).closest('[inert]')).not.toBeNull();
+  await settle(() => answer(responseFor(1)));
+  await saved();
+  expect(screen.getByRole('region', { name: 'Route' }).closest('[inert]')).toBeNull();
+});
+
+test('Retry after Edit trip never saves a route that is no longer on screen', async () => {
+  savedTrip(); show();
+  await viewTrip();
+  await settle(() => fireEvent.click(screen.getByRole('button', { name: 'Edit trip' })));
+  await screen.findByText('Editing', { exact: false });
+  server.fail = 1;
+  await setTime('20:15');
+  expect(await screen.findByRole('button', { name: 'Retry' })).toBeInTheDocument();
+  await viewTrip();
+  await pressIn('Edit trip');
+  await askedFirst();
+  await pressIn('Replace it');
+  await screen.findByText('Editing', { exact: false });
+  // The planner shows the trip as confirmed, so the change that failed is not on screen to retry.
+  await saved();
+  expect(screen.queryByRole('button', { name: 'Retry' })).not.toBeInTheDocument();
+  expect(server.writes).toHaveLength(1);
+  expect(server.trips.get(TRIP_ID).snapshot.inputs.arrive_by).toBeUndefined();
+});
+
+test('a copy saved after the person has moved on leaves the planner and its calculation alone', async () => {
+  savedTrip(); show();
+  await viewTrip();
+  server.hold = true;
+  fireEvent.click(screen.getByRole('button', { name: 'Edit a copy' }));
+  await waitFor(() => expect(server.held).toHaveLength(1));
+  fireEvent.click(screen.getByRole('button', { name: 'My trips' }));
+  fireEvent.click(screen.getByRole('tab', { name: 'Plan trip' }));
+  fillTrip();
+  let answer;
+  fetch.mockReturnValue(new Promise((resolve) => { answer = resolve; }));
+  calculate();
+  server.hold = false;
+  await settle(() => server.held.shift()());
+  await waitFor(() => expect(server.trips.size).toBe(2));
+  expect(screen.queryByText('Editing', { exact: false })).not.toBeInTheDocument();
+  await settle(() => answer(responseFor(3)));
+  expect(screen.getByRole('heading', { name: 'Your route' })).toBeInTheDocument();
+  await saved();
+});
+
+test('a copy saved after another trip was opened leaves that trip open', async () => {
+  savedTrip(); show();
+  await viewTrip();
+  server.hold = true;
+  fireEvent.click(screen.getByRole('button', { name: 'Edit a copy' }));
+  await waitFor(() => expect(server.held).toHaveLength(1));
+  fireEvent.click(screen.getByRole('button', { name: 'My trips' }));
+  mockTrip.current = { ...mockTrip.current, id: '66666666-6666-4666-8666-666666666666', title: 'Saturday lunch' };
+  await settle(() => fireEvent.click(screen.getByRole('button', { name: 'Fixture views trip' })));
+  expect(screen.getByRole('heading', { name: 'Saturday lunch' })).toBeInTheDocument();
+  server.hold = false;
+  await settle(() => server.held.shift()());
+  await waitFor(() => expect(server.trips.size).toBe(2));
+  expect(screen.getByRole('heading', { name: 'Saturday lunch' })).toBeInTheDocument();
+  expect(screen.queryByText('Editing', { exact: false })).not.toBeInTheDocument();
+});
+
+// The planner holds the trip and its newer save is held back, while the trip view still shows the trip as opened.
+async function viewBehindPlanner() {
+  savedTrip(); show();
+  await viewTrip();
+  await settle(() => fireEvent.click(screen.getByRole('button', { name: 'Edit trip' })));
+  await screen.findByText('Editing', { exact: false });
+  server.hold = true;
+  await setTime('20:15');
+  await waitFor(() => expect(server.held).toHaveLength(1));
+  await viewTrip();
+}
+
+test('Edit trip that cannot load its places says so and leaves nothing busy', async () => {
+  await viewBehindPlanner();
+  fireEvent.click(screen.getByRole('button', { name: 'Edit trip' }));
+  resolvePlace.mockRejectedValue(new Error('Lookup failed.'));
+  server.hold = false;
+  await settle(() => server.held.shift()());
+  expect(await screen.findByRole('alert')).toHaveTextContent('This trip could not be loaded.');
+  expect(screen.getByRole('button', { name: 'Edit trip' })).not.toBeDisabled();
+});
+
+test('a copy that saved but could not open says so, and a second press opens that copy, not another', async () => {
+  await viewBehindPlanner();
+  fireEvent.click(screen.getByRole('button', { name: 'Edit a copy' }));
+  const places = resolvePlace.getMockImplementation();
+  resolvePlace.mockRejectedValue(new Error('Lookup failed.'));
+  server.hold = false;
+  await settle(() => server.held.shift()());
+  expect(await screen.findByRole('alert')).toHaveTextContent('This trip could not be loaded.');
+  expect(server.writes.filter((write) => write.method === 'POST')).toHaveLength(1);
+  resolvePlace.mockImplementation(places);
+  await settle(() => fireEvent.click(screen.getByRole('button', { name: 'Edit a copy' })));
+  expect(await screen.findByText('Editing', { exact: false })).toHaveTextContent('Editing Copy of Friday dinner');
+  expect(server.writes.filter((write) => write.method === 'POST')).toHaveLength(1);
+});
+
+test('going back while Edit trip waits frees the planner at once, and the wait then changes nothing', async () => {
+  await viewBehindPlanner();
+  fireEvent.click(screen.getByRole('button', { name: 'Edit trip' }));
+  expect(screen.getByRole('button', { name: 'Edit trip' })).toBeDisabled();
+  await act(async () => { fireEvent.click(document.querySelector('.trip-view-back')); });
+  fireEvent.click(screen.getByRole('tab', { name: 'Plan trip' }));
+  expect(calculateButton()).not.toBeDisabled();
+  server.hold = false;
+  await settle(() => server.held.shift()());
+  await saved();
+  expect(screen.getByRole('tab', { name: 'Plan trip' })).toHaveAttribute('aria-selected', 'true');
+});
+
+test('Edit trip reads a trip whose last reply was lost, rather than showing an older copy as saved', async () => {
+  await viewBehindPlanner();
+  fireEvent.click(screen.getByRole('button', { name: 'Edit trip' }));
+  // The save lands, but neither its reply nor the read after it arrives.
+  server.lose = 1;
+  server.failReads = 1;
+  server.hold = false;
+  await settle(() => server.held.shift()());
+  expect(await screen.findByText('Editing', { exact: false })).toBeInTheDocument();
+  await waitFor(() => expect(screen.getByLabelText('Arrive by time')).toHaveValue('20:15'));
+});
+
+test('Edit trip starts from what was saved when an edit in the trip landed but its reply did not', async () => {
+  savedTrip(); show();
+  await viewTrip();
+  server.lose = 1;
+  await setTime('20:15');
+  await screen.findByRole('alert');
+  await rename(/^Who is at pickup 1/, 'Who is at pickup 1', 'Mia');
+  await waitFor(() => expect(server.trips.get(TRIP_ID).snapshot.inputs.passengers[0].person).toBe('Mia'));
+  await settle(() => fireEvent.click(screen.getByRole('button', { name: 'Edit trip' })));
+  await screen.findByText('Editing', { exact: false });
+  await waitFor(() => expect(screen.getByLabelText('Arrive by time')).toHaveValue('20:15'));
+});
+
+test('a retried copy takes a change made to its trip since the first try, under the same ID', async () => {
+  savedTrip(); show();
+  await viewTrip();
+  server.fail = 1;
+  await settle(() => fireEvent.click(screen.getByRole('button', { name: 'Edit a copy' })));
+  expect(await screen.findByRole('alert')).toHaveTextContent('The copy was not saved.');
+  await setTime('20:15');
+  await rename(/^Trip name: Friday dinner/, 'Trip name', 'Dinner at BCD');
+  await settle(() => fireEvent.click(screen.getByRole('button', { name: 'Edit a copy' })));
+  expect(await screen.findByText('Editing', { exact: false })).toHaveTextContent('Editing Copy of Dinner at BCD');
+  const [copy, ...others] = [...server.trips.values()].filter((trip) => trip.id !== TRIP_ID);
+  expect(others).toEqual([]);
+  expect(copy.snapshot).toEqual(server.trips.get(TRIP_ID).snapshot);
+  expect(copy.snapshot.inputs.arrive_by).toBe(`${today()}T20:15`);
+  expect(screen.getByLabelText('Arrive by time')).toHaveValue('20:15');
+});
+
+test('a retried copy keeps a name given to it meanwhile, and still takes its trip\'s change', async () => {
+  savedTrip(); show();
+  await viewTrip();
+  server.lose = 1;
+  await settle(() => fireEvent.click(screen.getByRole('button', { name: 'Edit a copy' })));
+  expect(await screen.findByRole('alert')).toHaveTextContent('The copy was not saved.');
+  const [made] = [...server.trips.values()].filter((trip) => trip.id !== TRIP_ID);
+  made.title = 'Saturday version';
+  await setTime('20:15');
+  await settle(() => fireEvent.click(screen.getByRole('button', { name: 'Edit a copy' })));
+  expect(await screen.findByText('Editing', { exact: false })).toHaveTextContent('Editing Saturday version');
+  expect(server.trips.get(made.id).title).toBe('Saturday version');
+  expect(server.trips.get(made.id).snapshot.inputs.arrive_by).toBe(`${today()}T20:15`);
+});
+
+test('a trip opened again shows an edit that lands while its places are looked up', async () => {
+  savedTrip(); show();
+  await viewTrip();
+  server.hold = true;
+  await rename(/^Who is at pickup 1/, 'Who is at pickup 1', 'Mia');
+  await setTime('20:15');
+  fireEvent.click(screen.getByRole('button', { name: 'My trips' }));
+  const lookup = resolvePlace.getMockImplementation();
+  const lookups = [];
+  resolvePlace.mockImplementation((...args) => new Promise((resolve) => { lookups.push(() => resolve(lookup(...args))); }));
+  const answerLookups = () => settle(() => lookups.splice(0).forEach((answer) => answer()));
+  await settle(() => fireEvent.click(screen.getByRole('button', { name: 'Fixture views trip' })));
+  await settle(() => server.held.shift()());
+  await answerLookups();
+  // The first edit is in, so the trip is being looked up again when the second one lands.
+  server.hold = false;
+  await settle(() => server.held.shift()());
+  await answerLookups();
+  await answerLookups();
+  expect(await screen.findByLabelText('Arrive by time')).toHaveValue('20:15');
+  expect(screen.getAllByText('Mia').length).toBeGreaterThan(0);
+  expect(server.trips.get(TRIP_ID).snapshot.inputs.arrive_by).toBe(`${today()}T20:15`);
+});
+
+test('Edit a copy keeps its retry when the trip cannot be read, so it never makes a second copy', async () => {
+  savedTrip(); show();
+  await viewTrip();
+  server.lose = 1;
+  await settle(() => fireEvent.click(screen.getByRole('button', { name: 'Edit a copy' })));
+  expect(await screen.findByRole('alert')).toHaveTextContent('The copy was not saved.');
+  expect(server.trips.size).toBe(2);
+  // An edit whose reply and read are both lost leaves the trip itself uncertain too.
+  server.lose = 1;
+  server.unreadable = TRIP_ID;
+  await setTime('20:15');
+  await settle(() => fireEvent.click(screen.getByRole('button', { name: 'Edit a copy' })));
+  server.unreadable = null;
+  await waitFor(() => expect(screen.getByRole('tab', { name: 'Plan trip' })).toHaveAttribute('aria-selected', 'true'));
+  expect(screen.getByText('Editing', { exact: false })).toHaveTextContent('Editing Copy of Friday dinner');
+  expect(server.trips.size).toBe(2);
+});
+
+test('nothing in a trip can be changed while Edit trip or Edit a copy loads it, and going back still can be', async () => {
+  await viewBehindPlanner();
+  const results = screen.getByRole('region', { name: 'Route' });
+  expect(results.closest('[inert]')).toBeNull();
+  fireEvent.click(screen.getByRole('button', { name: 'Edit trip' }));
+  expect(results.closest('[inert]')).not.toBeNull();
+  expect(screen.getByRole('heading', { name: 'Friday dinner' }).closest('[inert]')).not.toBeNull();
+  expect(document.querySelector('.trip-view-back').closest('[inert]')).toBeNull();
+  server.hold = false;
+  await settle(() => server.held.shift()());
+  await screen.findByText('Editing', { exact: false });
+});
+
+test('Edit trip starts again from a save that lands while it loads the places', async () => {
+  savedTrip(); show();
+  await viewTrip();
+  server.lose = 1;
+  await setTime('20:15');
+  await screen.findByRole('alert');
+  await waitFor(() => expect(server.protectedRequest).toHaveBeenCalled());
+  const places = resolvePlace.getMockImplementation();
+  const lookups = [];
+  resolvePlace.mockImplementation((...args) => new Promise((resolve) => { lookups.push(() => resolve(places(...args))); }));
+  await settle(() => fireEvent.click(screen.getByRole('button', { name: 'Edit trip' })));
+  await waitFor(() => expect(lookups.length).toBeGreaterThan(0));
+  await rename(/^Who is at pickup 1/, 'Who is at pickup 1', 'Mia');
+  await waitFor(() => expect(server.trips.get(TRIP_ID).snapshot.inputs.passengers[0].person).toBe('Mia'));
+  resolvePlace.mockImplementation(places);
+  await settle(() => lookups.splice(0).forEach((go) => go()));
+  await screen.findByText('Editing', { exact: false });
+  expect(await screen.findByRole('button', { name: /^Who is at pickup 1: Mia/ })).toBeInTheDocument();
+});
+
+test('a destination name for a place the trip no longer goes to is refused, not shown', async () => {
+  savedTrip(); show();
+  await viewTrip();
+  // A lost reply leaves the trip to be read again before the next write, and elsewhere it moves to another place.
+  server.lose = 1;
+  server.unreadable = TRIP_ID;
+  await setTime('20:15');
+  await screen.findByRole('alert');
+  server.unreadable = null;
+  server.trips.get(TRIP_ID).snapshot.inputs.destination.source.place_id = 'mia';
+  await rename(/^Destination name/, 'Destination name', 'Our place');
+  expect(await screen.findByText(/can't be saved on this trip/)).toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: /^Destination name: Our place/ })).not.toBeInTheDocument();
+  expect(server.trips.get(TRIP_ID).snapshot.inputs.destination.label).toBe('BCD Tofu');
+});
+
+test('a name for a stop the planner no longer has is refused, not shown', async () => {
+  savedTrip();
+  mockSaved.locations = [mockHome];
+  show();
+  await viewTrip();
+  await settle(() => fireEvent.click(screen.getByRole('button', { name: 'Edit trip' })));
+  await screen.findByText('Editing', { exact: false });
+  server.hold = true;
+  fireEvent.click(screen.getByRole('button', { name: 'Remove pickup 1' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Add pickup' }));
+  fill('Pickup 1 location', 'Elsewhere');
+  fill('Passengers at pickup 1', '1');
+  fetch.mockResolvedValue({ ok: true, json: async () => ({ optimizedRoutes: [[{ lat: 1, lng: 1 }, { lat: 4, lng: 4 }, { lat: 9, lng: 9 }]] }) }); calculate();
+  await act(async () => {});
+  await waitFor(() => expect(server.held).toHaveLength(1));
+  await viewTrip();
+  await rename(/^Who is at pickup 1/, 'Who is at pickup 1', 'Mia');
+  expect(await screen.findByText(/can't be saved on this trip/)).toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: /^Who is at pickup 1: Mia/ })).not.toBeInTheDocument();
+  server.hold = false;
+  await settle(() => server.held.shift()());
+});
+
+test('a change the planner saves for an open trip and the server refuses says so in the trip', async () => {
+  savedTrip(); show();
+  await viewTrip();
+  await settle(() => fireEvent.click(screen.getByRole('button', { name: 'Edit trip' })));
+  await screen.findByText('Editing', { exact: false });
+  await viewTrip();
+  server.refuse = 1;
+  await setTime('20:15');
+  expect(await screen.findByText('Your latest changes cannot be saved. Calculate the route again to save it.')).toBeInTheDocument();
+});
+
+test('a copy that saves after the person went on in the planner stays in My trips and does not open', async () => {
+  savedTrip(); show();
+  await viewTrip();
+  await settle(() => fireEvent.click(screen.getByRole('button', { name: 'Edit trip' })));
+  await screen.findByText('Editing', { exact: false });
+  await viewTrip();
+  server.hold = true;
+  fireEvent.click(screen.getByRole('button', { name: 'Edit a copy' }));
+  await waitFor(() => expect(server.held).toHaveLength(1));
+  fireEvent.click(screen.getByRole('tab', { name: 'Plan trip' }));
+  await setTime('20:15');
+  server.hold = false;
+  await settle(() => server.held.splice(0).forEach((go) => go()));
+  await waitFor(() => expect(server.trips.size).toBe(2));
+  await saved();
+  expect(screen.getByText('Editing', { exact: false })).toHaveTextContent('Editing Friday dinner');
+  expect(calculateButton()).not.toBeDisabled();
+});
+
+test('a trip that cannot be read says to check the connection, not the places', async () => {
+  savedTrip(); show();
+  await viewTrip();
+  server.lose = 1;
+  server.unreadable = TRIP_ID;
+  await setTime('20:15');
+  await screen.findByRole('alert');
+  await settle(() => fireEvent.click(screen.getByRole('button', { name: 'Edit trip' })));
+  expect(await screen.findByText('This trip could not be read. Check your connection and try again.')).toBeInTheDocument();
+});
+

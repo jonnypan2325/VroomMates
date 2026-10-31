@@ -3,7 +3,7 @@ import { TextEncoder } from 'util';
 import { act, renderHook } from '@testing-library/react';
 import createTripWriter from './tripWriter';
 import useTripAutoSave from './useTripAutoSave';
-import { followTitle, titleFacts, titleFromFacts } from './tripTitles';
+import { copyTitle, followTitle, titleFacts, titleFromFacts } from './tripTitles';
 
 const automaticTitle = (route, now) => titleFromFacts(titleFacts(route), now);
 
@@ -44,6 +44,13 @@ it('an automatic title follows a renamed or recalculated destination, keeping it
   // Without a save date, clearing the arrive-by leaves the title rather than guessing a day.
   expect(followTitle(`Trip to BCD, ${day(2026, 11, 6)}`, facts('BCD', '2026-11-06T18:45'), facts('BCD'), undefined))
     .toBe(`Trip to BCD, ${day(2026, 11, 6)}`);
+});
+
+it('a copy of a long name stays within the 200-byte limit', () => {
+  const title = copyTitle('\u4e2d'.repeat(66));
+  expect(new TextEncoder().encode(title).length).toBeLessThanOrEqual(200);
+  expect(title).toMatch(/^Copy of \u4e2d+$/);
+  expect(Array.from(copyTitle('a'.repeat(200))).length).toBe(200);
 });
 
 // Saves through the hook and the account's writer, against an API in memory whose replies can be held back.
@@ -224,4 +231,147 @@ it('shows the name the trip has now, after a rename from anywhere', async () => 
   act(() => { view.result.current.save.saveEdits(routeResult('reopened', 'mia')); });
   await idle(view);
   expect(server.trips.get(TRIP_A).title).toBe('Renamed in My trips');
+});
+
+it('changes made after a trip was deleted elsewhere are the ones Retry saves', async () => {
+  const view = mount({ result: routeResult('reopened'), start: opened(TRIP_A) });
+  server.trips.delete(TRIP_A);
+  const first = routeResult('reopened', 'mia');
+  act(() => { view.result.current.save.saveEdits(first); });
+  view.rerender({ writer, result: first });
+  await settle();
+  const later = { ...routeResult('reopened', 'uci'), id: first.id };
+  act(() => { view.result.current.save.saveEdits(later); });
+  view.rerender({ writer, result: later });
+  await act(async () => { view.result.current.save.retry(); });
+  await idle(view);
+  expect(server.trips.get(server.requests.at(-1).id).snapshot).toEqual(later.snapshot);
+});
+
+it('a new trip that failed to save keeps its status and Retry through a newer route, which Retry then saves', async () => {
+  server.fail = [503];
+  const first = routeResult();
+  const view = mount({ result: first });
+  await settle();
+  const newer = routeResult('calculated', 'uci');
+  view.rerender({ writer, result: newer });
+  await settle();
+  expect(view.result.current.save.phase).toBe('error');
+  await act(async () => { view.result.current.save.retry(); });
+  await idle(view);
+  expect(view.result.current.save.phase).toBe('saved');
+  expect(server.trips.size).toBe(1);
+  expect([...server.trips.values()][0].snapshot).toEqual(newer.snapshot);
+});
+
+it('a trip loaded into the planner again ends a failed save: Retry can only save what is shown', async () => {
+  const view = mount({ result: routeResult('reopened'), start: opened(TRIP_A) });
+  server.fail = [503];
+  const edited = routeResult('reopened', 'mia');
+  act(() => { view.result.current.save.saveEdits(edited); });
+  view.rerender({ writer, result: edited });
+  await settle();
+  expect(view.result.current.save.phase).toBe('error');
+  const confirmed = routeResult('reopened');
+  act(() => { view.result.current.save.hold(confirmed, TRIP_A); });
+  view.rerender({ writer, result: confirmed });
+  expect(view.result.current.save.phase).toBe('saved');
+  // The next change saves from the route shown.
+  const next = routeResult('reopened', 'sam');
+  act(() => { view.result.current.save.saveEdits(next); });
+  await idle(view);
+  expect(server.trips.get(TRIP_A).snapshot).toEqual(next.snapshot);
+});
+
+it('a route the server will not take as a new trip leaves no trip behind, so calculating again starts one', async () => {
+  server.fail = [400];
+  const view = mount({ result: routeResult() });
+  await idle(view);
+  expect(view.result.current.save.phase).toBe('unsavable');
+  expect(view.result.current.trip).toBeNull();
+  const next = routeResult();
+  view.rerender({ writer, result: next });
+  await idle(view);
+  expect(view.result.current.save.phase).toBe('saved');
+  expect(server.requests.filter((request) => request.method === 'GET')).toHaveLength(0);
+  expect(server.trips.size).toBe(1);
+});
+
+it('a save that fails after a new trip finally saved is a failed save, not a failed new trip', async () => {
+  server.fail = [503];
+  const route = routeResult();
+  const view = mount({ result: route });
+  await settle();
+  const edited = { ...routeResult('calculated', 'mia'), id: route.id };
+  act(() => { view.result.current.save.saveEdits(edited); });
+  view.rerender({ writer, result: edited });
+  await settle();
+  server.fail = [503];
+  server.protectedRequest.mockClear();
+  // The new trip saves, then the change made after it fails. (Retry's first read finds nothing yet.)
+  server.fail = [];
+  const original = server.protectedRequest.getMockImplementation();
+  let writes = 0;
+  server.protectedRequest.mockImplementation((path, options = {}) => {
+    if (options.method === 'PATCH') { writes += 1; if (writes === 1) return Promise.resolve(reply(503, { error: { code: 'SYNTHETIC' } })); }
+    return original(path, options);
+  });
+  await act(async () => { view.result.current.save.retry(); });
+  await settle();
+  expect(view.result.current.save.phase).toBe('error');
+  expect(view.result.current.trip).not.toBeNull();
+  // A newer change goes straight out, rather than waiting behind a new trip that has in fact saved.
+  const newer = { ...routeResult('calculated', 'sam'), id: route.id };
+  act(() => { view.result.current.save.saveEdits(newer); });
+  view.rerender({ writer, result: newer });
+  await idle(view);
+  expect(view.result.current.save.phase).toBe('saved');
+  expect([...server.trips.values()][0].snapshot).toEqual(newer.snapshot);
+});
+
+it('an automatic name still follows after one save of a reopened trip failed', async () => {
+  const route = routeResult('reopened', 'pickup', '2099-11-05T18:45');
+  server.trips.set(TRIP_A, { id: TRIP_A, title: `Trip to BCD, ${day(2099, 11, 5)}`, created_at: CREATED, snapshot: route.snapshot });
+  writer.remember(JSON.parse(JSON.stringify(server.trips.get(TRIP_A))));
+  const view = mount({ result: route, start: { id: TRIP_A, title: `Trip to BCD, ${day(2099, 11, 5)}`, opened: true,
+    created_at: CREATED, facts: facts('BCD', '2099-11-05T18:45') } });
+  server.fail = [503];
+  act(() => { view.result.current.save.saveEdits({ ...routeResult('reopened', 'pickup', '2099-11-06T18:45'), id: route.id }); });
+  await settle();
+  act(() => { view.result.current.save.saveEdits({ ...routeResult('reopened', 'pickup', '2099-11-07T18:45'), id: route.id }); });
+  await idle(view);
+  expect(server.trips.get(TRIP_A).title).toBe(`Trip to BCD, ${day(2099, 11, 7)}`);
+});
+
+it('lets go of a refused new trip even before the planner has shown it as held', async () => {
+  server.fail = [400];
+  const view = mount({ result: routeResult() });
+  await idle(view);
+  expect(view.result.current.trip).toBeNull();
+  expect(view.result.current.save.phase).toBe('unsavable');
+});
+
+it('a Retry still on its way when the trip is reloaded cannot hold back the saves after it', async () => {
+  server.fail = [503];
+  const route = routeResult();
+  const view = mount({ result: route });
+  await settle();
+  const { id } = view.result.current.trip;
+  // The trip turns out to exist, and the planner reloads it while a Retry is under way, which then fails.
+  server.trips.set(id, { id, title: 'Saved after all', created_at: CREATED, snapshot: route.snapshot });
+  act(() => { writer.remember(JSON.parse(JSON.stringify(server.trips.get(id)))); });
+  let fail;
+  server.protectedRequest.mockImplementationOnce(() => new Promise((_, no) => { fail = no; }));
+  act(() => { view.result.current.save.retry(); });
+  await settle();
+  const confirmed = { ...routeResult('reopened'), snapshot: route.snapshot };
+  act(() => { view.result.current.save.hold(confirmed, id); });
+  view.rerender({ writer, result: confirmed });
+  await act(async () => { fail(new TypeError('Offline')); });
+  expect(view.result.current.save.phase).toBe('saved');
+  const next = routeResult('reopened', 'lee');
+  act(() => { view.result.current.save.saveEdits(next); });
+  view.rerender({ writer, result: next });
+  await idle(view);
+  expect(server.trips.get(id).snapshot).toEqual(next.snapshot);
 });

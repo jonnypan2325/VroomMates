@@ -103,6 +103,20 @@ it('requires confirmation before deletion and removes only a confirmed 204', asy
   await click('Delete Team trip'); await click('Confirm delete Team trip');
   expect(screen.queryByText('Team trip')).not.toBeInTheDocument(); expect(screen.getByText('Trip deleted.')).toBeVisible();
 });
+it('counts a trip already gone as deleted, so nothing still holding it saves it again', async () => {
+  const transport = jest.fn(async (path, options) => options.method === 'DELETE' ? response({ error: { code: 'NOT_FOUND' } }, 404) : listed());
+  const auth = authFor(transport);
+  const writer = createTripWriter(() => auth);
+  writer.remember(detail().trip);
+  const onOpened = jest.fn();
+  await renderPanel(auth, { writer, openedTrip: { id: ID }, onOpened });
+  await click('Delete Team trip'); await click('Confirm delete Team trip');
+  expect(screen.queryByText('Team trip')).not.toBeInTheDocument();
+  expect(screen.getByText('Trip deleted.')).toBeVisible();
+  expect(writer.known(ID)).toBeUndefined();
+  await expect(writer.update(ID, { title: 'Too late' })).rejects.toMatchObject({ kind: 'dropped' });
+  expect(onOpened).toHaveBeenCalledWith(null);
+});
 it('retains a record when delete acknowledgement is invalid', async () => {
   const transport = jest.fn(async (path, options) => options.method === 'DELETE' ? response({ unexpected: true }) : listed());
   await renderPanel(authFor(transport)); await click('Delete Team trip'); await click('Confirm delete Team trip');
