@@ -1,13 +1,13 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import AddressInput from './components/AddressInput';
-import SavedTripsPanel, { canonicalSnapshot, editedDate, readTrip } from './saving/SavedTripsPanel';
-import { SavedApiError, canonicalText, newId, requestJSON } from './saving/api';
+import SavedTripsPanel, { editedDate } from './saving/SavedTripsPanel';
+import { newId } from './saving/api';
 import InlineEdit from './saving/InlineEdit';
 import TripSaveStatus from './saving/TripSaveStatus';
 import useSavedLocations from './saving/useSavedLocations';
 import createTripWriter from './saving/tripWriter';
 import useTripAutoSave from './saving/useTripAutoSave';
-import { copyTitle, followTitle, titleFacts } from './saving/tripTitles';
+import { copyTitle, titleFacts } from './saving/tripTitles';
 import RouteResults from './results/RouteResults';
 import useRouteMap from './results/useRouteMap';
 import { SavedLocationControls, SavedLocationsPanel } from './saving/SavedLocationControls';
@@ -133,12 +133,12 @@ function TripView({ view, route, selected, onSelect, onRetry, onBack, onEdit, on
       My trips</button>
     <h2 aria-label={trip.title}><InlineEdit value={trip.title} label="Trip name" className="trip-view-title" onCommit={(next) => attempt(() => onTitle(next))} /></h2>
     <p className="saving-note trip-view-meta">{drivers} {drivers === 1 ? 'driver' : 'drivers'} · {people} {people === 1 ? 'passenger' : 'passengers'} · last edited {editedDate(trip)}</p>
-    {result.changed && <ChangedNotice result={result} busy={busy} onRecalculate={() => onEdit(true)} />}
+    {result.changed && <ChangedNotice result={result} busy={busy} onRecalculate={() => void onEdit(true)} />}
     <RouteResults result={result} routes={route.routes} legs={route.legs} status={route.status}
       selected={selected} onSelect={onSelect} onRetry={onRetry} onRename={onRename} onArriveBy={onArriveBy}>{saveStatus}</RouteResults>
     {error && <p className="saving-error" role="alert">{error}</p>}
     <div className="trip-view-actions">
-      <button type="button" className="secondary-button" disabled={busy} onClick={() => onEdit(false)}>Edit trip</button>
+      <button type="button" className="secondary-button" disabled={busy} onClick={() => void onEdit(false)}>Edit trip</button>
       <button type="button" className="text-button" disabled={busy} onClick={() => void copy()}>{copying ? 'Copying…' : 'Edit a copy'}</button>
     </div>
   </div>;
@@ -388,17 +388,30 @@ export default function LocationInput({ map, auth }) {
       if (current(captured)) setBusy(false);
     }
   };
-  // Edit in planner loads the viewed trip into Plan trip; Recalculate also calculates it again, which updates the trip.
-  const editInPlanner = (recalculate, trip = viewedTrip?.trip) => {
+  // Edit trip loads the viewed trip into Plan trip once its changes still being saved are in; Recalculate also
+  // calculates it again, which updates the trip. Edit a copy loads the same route as the copy.
+  // The open trip as last changed, ahead of the next render: Edit trip reads it once its saves are in.
+  const latestView = useRef(viewedTrip);
+  latestView.current = viewedTrip;
+  const changeView = (update) => {
+    latestView.current = update(latestView.current);
+    setViewedTrip(update);
+  };
+  const editInPlanner = async (recalculate, trip = null) => {
     if (!viewedTrip) return;
-    const { result: restored } = viewedTrip;
+    const id = viewedTrip.trip.id;
+    await writerRef.current?.drain(id);
+    const view = latestView.current;
+    if (view?.trip.id !== id) return;
+    const target = trip || writerRef.current?.known(id) || view.trip;
+    const { result: restored } = view;
     invalidate(); setError('');
     setDrivers(restored.inputs.drivers);
     setPassengers(groupPassengerPickups(restored.inputs.passengers));
     setDestination(restored.inputs.destination);
     setArriveBy(restored.inputs.arrive_by || '');
     setResult(restored);
-    setOpenedTrip({ id: trip.id, title: trip.title, opened: true, created_at: trip.created_at, facts: titleFacts(restored) });
+    setOpenedTrip({ id: target.id, title: target.title, opened: true, created_at: target.created_at, facts: titleFacts(restored) });
     setViewedTrip(null);
     setActiveView('plan');
     viewButtons.current.plan?.focus();
@@ -422,101 +435,75 @@ export default function LocationInput({ map, auth }) {
   };
   const renamePlanned = async (target, text) => editPlanned(nameChange(target, text, resultRef.current));
   const arrivePlanned = async (value) => editPlanned(arriveByChange(value));
-  // A trip opened from My trips saves a change straight away; the stops it follows from My locations keep their own names.
-  // Edits in an open trip go one at a time, each built on the trip as the last one left it, so none is lost.
-  const viewRef = useRef(viewedTrip);
-  viewRef.current = viewedTrip;
+  // A trip opened from My trips saves a change straight away, through the writer, in turn with any other
+  // change to that trip; the stops it follows from My locations keep their own names.
   const openedRef = useRef(openedTrip);
   openedRef.current = openedTrip;
-  const viewEdits = useRef(Promise.resolve());
-  const inTurn = (task) => {
-    const run = viewEdits.current.then(task);
-    viewEdits.current = run.catch(() => {});
-    return run;
-  };
-  const showViewed = (view) => {
-    // A trip still waiting for My locations keeps waiting through its edits.
-    const next = viewRef.current?.trip.id === view.trip.id && viewRef.current.linksPending ? { ...view, linksPending: true } : view;
-    viewRef.current = next;
-    setViewedTrip((current) => current?.trip.id === next.trip.id ? next : current);
-  };
-  const editViewed = (change, what) => inTurn(async () => {
-    const view = viewRef.current;
-    if (!view) return;
-    // The planner may be saving this same trip; its queue then carries the change, so neither save overwrites the other.
-    if (openedRef.current?.id === view.trip.id && resultRef.current?.snapshot) {
+  const editViewed = async (change, what) => {
+    const view = viewedTrip;
+    const editor = writerRef.current;
+    if (!view || !editor) return;
+    const id = view.trip.id;
+    // The planner may be saving this same trip; its saves then carry the change, so neither overwrites the other.
+    if (openedRef.current?.id === id && resultRef.current?.snapshot) {
       editPlanned(change);
-      showViewed({ trip: { ...view.trip, snapshot: renameInSnapshot(view.trip.snapshot, change, view.result.inputs.destination.source) },
-        result: renameInResult(view.result, change) });
+      changeView((current) => current?.trip.id === id ? { ...current, trip: { ...current.trip,
+        snapshot: renameInSnapshot(current.trip.snapshot, change, current.result.inputs.destination.source) },
+      result: renameInResult(current.result, change) } : current);
       return;
     }
-    const snapshot = renameInSnapshot(view.trip.snapshot, change, view.result.inputs.destination.source);
-    const facts = titleFacts(renameInResult(view.result, change));
-    const title = followTitle(view.trip.title, titleFacts(view.result), facts, view.trip.created_at);
+    const place = view.result.inputs.destination.source;
+    // The stored destination has no landmark name, so an automatic title reads it from the place shown.
+    const shown = view.result.inputs.destination;
+    const factsOf = (snapshot) => titleFacts({ inputs: { ...snapshot.inputs,
+      destination: { place_name: shown.place_name, address: shown.address, ...snapshot.inputs.destination } } });
     let saved;
     try {
-      const response = await requestJSON(auth, `/saved-trips/${view.trip.id}`, { method: 'PATCH',
-        body: { ...(title !== view.trip.title ? { title } : {}), snapshot: canonicalSnapshot(snapshot) } });
-      saved = readTrip(response, view.trip.id);
+      saved = await editor.update(id, { snapshot: (current) => renameInSnapshot(current, change, place),
+        follow: (current, next) => ({ before: factsOf(current.snapshot), after: factsOf(next) }) });
     } catch (_) {
       throw new Error(`The ${what} was not saved. Check your connection and try again.`);
     }
-    showViewed({ trip: saved, result: renameInResult(view.result, change) });
+    changeView((current) => current?.trip.id === id ? { ...current, trip: saved, result: renameInResult(current.result, change) } : current);
     // The planner may have opened this trip while the save was under way.
-    if (openedRef.current?.id === saved.id) {
-      renameInPlanner(change);
-      setOpenedTrip((trip) => trip?.id === saved.id ? { ...trip, title: saved.title, facts } : trip);
-    }
+    if (openedRef.current?.id === id) renameInPlanner(change);
     // My trips lists a trip by its title and dates it by its arrive-by time, so its list goes stale.
     if (change.arriveBy !== undefined || saved.title !== view.trip.title) setListVersion((version) => version + 1);
-  });
-  // Edit a copy saves a new trip with the same route first, then edits that one; the original is never touched.
-  const copyAttempt = useRef(null);
+  };
+  // Edit a copy saves a new trip with the trip as it stands, once its changes still being saved are in, then
+  // edits the copy; the original is never touched. An unclear failure retries the same copy, never making two.
+  const copyRetry = useRef(null);
   const copyViewed = async () => {
     const view = viewedTrip;
-    if (!view) return;
+    const editor = writerRef.current;
+    if (!view || !editor) return;
+    const id = view.trip.id;
     const captured = beginLoad();
-    if (copyAttempt.current?.tripId !== view.trip.id) copyAttempt.current = { tripId: view.trip.id, id: newId(), unclear: false };
-    const pending = copyAttempt.current;
     let copy;
     try {
-      let response;
-      // An unclear earlier reply may still have saved the copy; the same ID finds it rather than making two.
-      if (pending.unclear) {
-        try { response = await requestJSON(auth, `/saved-trips/${pending.id}`); } catch (error) {
-          if (!(error instanceof SavedApiError && error.status === 404)) throw error;
-        }
-      }
-      if (!response) {
-        response = await requestJSON(auth, '/saved-trips', { method: 'POST',
-          body: { id: pending.id, title: copyTitle(view.trip.title), snapshot: canonicalSnapshot(view.trip.snapshot) } });
-      }
-      copy = readTrip(response, pending.id);
+      await editor.drain(id);
+      const source = editor.known(id) || view.trip;
+      const retry = copyRetry.current?.tripId === id ? copyRetry.current.retry : null;
+      copyRetry.current = null;
+      copy = await (retry ? retry() : editor.create({ id: newId(), title: copyTitle(source.title), snapshot: source.snapshot }));
     } catch (error) {
-      const definite = error instanceof SavedApiError && [400, 409, 413, 415].includes(error.status);
-      copyAttempt.current = definite ? null : { ...pending, unclear: true };
+      if (error.retry) copyRetry.current = { tripId: id, retry: error.retry };
       endLoad(captured);
       throw new Error('The copy was not saved. Check your connection and try again.');
     }
-    copyAttempt.current = null;
     setListVersion((version) => version + 1);
-    if (current(captured)) editInPlanner(false, copy);
+    if (current(captured)) void editInPlanner(false, copy);
   };
   // A new name here is the person's own, so a later arrive-by date leaves it as it is.
-  const titleViewed = (text) => inTurn(async () => {
-    const view = viewRef.current;
-    if (!view) return;
-    try {
-      // The planner may be saving this same trip; its queue then sends the name in turn.
-      if (openedRef.current?.id === view.trip.id) { await autoSave.rename(text); return; }
-      const response = await requestJSON(auth, `/saved-trips/${view.trip.id}`, { method: 'PATCH',
-        body: { title: canonicalText(text, 200, 200) } });
-      showViewed({ ...view, trip: readTrip(response, view.trip.id) });
-      setListVersion((version) => version + 1);
-    } catch (_) {
+  const titleViewed = async (text) => {
+    const id = viewedTrip?.trip.id;
+    const editor = writerRef.current;
+    if (!id || !editor) return;
+    try { await editor.update(id, { title: text }); } catch (_) {
       throw new Error('The name was not saved. Check your connection and try again.');
     }
-  });
+    setListVersion((version) => version + 1);
+  };
   const relinkViewed = useCallback((view, restored) => {
     setViewedTrip((current) => current === view ? { trip: current.trip, result: restored } : current);
   }, []);
@@ -700,15 +687,16 @@ export default function LocationInput({ map, auth }) {
           </RouteResults>}
           </div>
           <SavedTripsPanel auth={auth} activeView={activeView} openedTrip={openedTrip}
-            // Deleting the trip the planner holds also drops its waiting saves, so it never comes back.
-            onOpened={(trip) => { if (!trip && openedTrip) writer?.forget(openedTrip.id); setOpenedTrip(trip); }}
+            writer={writer} onOpened={setOpenedTrip}
             listVersion={listVersion} viewing={!!viewedTrip}
             onBeginLoad={beginLoad} onEndLoad={endLoad} onView={viewTrip}>
-            {viewedTrip && <TripView key={viewedTrip.trip.id} view={viewedTrip} route={route} selected={selected} onSelect={selectDriver} busy={busy}
+            {viewedTrip && <TripView key={viewedTrip.trip.id} route={route}
+              // The trip's name and dates as last confirmed, whoever changed them.
+              view={{ ...viewedTrip, trip: writer?.known(viewedTrip.trip.id) || viewedTrip.trip }} selected={selected} onSelect={selectDriver} busy={busy}
               onRetry={() => setMapAttempt((attempt) => attempt + 1)} onBack={() => setViewedTrip(null)} onEdit={editInPlanner}
               onCopy={copyViewed} onTitle={titleViewed}
               onRename={renameViewed} onArriveBy={arriveViewed}
-              // This trip is also in the planner, whose queue saves its names: a failed save shows here too, with Retry.
+              // This trip is also in the planner, whose saves carry its names: a failed save shows here too, with Retry.
               saveStatus={openedTrip?.id === viewedTrip.trip.id && autoSave.phase === 'error'
                 ? <TripSaveStatus save={autoSave} auth={auth} /> : null} />}
           </SavedTripsPanel>

@@ -1,7 +1,7 @@
 import React, { useEffect, useId, useRef, useState } from 'react';
 import InlineEdit from '../saving/InlineEdit';
 import { Chevron } from '../saving/SavedLocationControls';
-import { GLYPHS } from './markerIcons';
+import { GLYPHS } from './glyphs';
 import { MAX_WAYPOINTS, mapsLinks, partLabel } from './mapsLinks';
 import RouteQr from './RouteQr';
 import { arrivalTimes, clockMinutes, driverColor, driverInk, driverName, formatDuration, formatTripClock, formatTripDate, peopleText,

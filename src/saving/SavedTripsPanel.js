@@ -115,7 +115,9 @@ function readList(body) {
   }), cursor: body.next_cursor };
 }
 
-function failureMessage(error, fallback) {
+function failureMessage(failure, fallback) {
+  // A write that went through the trip writer keeps the API's error as its cause.
+  const error = failure?.name === 'TripWriteError' && failure.cause ? failure.cause : failure;
   if (error instanceof SavedApiError) {
     if (error.status === 401) return 'Your sign-in expired. Please sign in again.';
     if (error.code === 'SAVED_TRIP_UNREADABLE') return 'This trip could not be read. Try again later.';
@@ -135,7 +137,7 @@ function tripDate(trip) {
 const emptyList = (scope) => ({ scope, trips: [], cursor: null, loaded: false, loading: false, error: '' });
 
 /** My trips: the saved list, renamed and deleted in place; Open shows a trip read-only through `onView`. */
-export default function SavedTripsPanel({ auth, onView, onBeginLoad, onEndLoad, activeView = 'all',
+export default function SavedTripsPanel({ auth, writer, onView, onBeginLoad, onEndLoad, activeView = 'all',
   openedTrip = null, onOpened, listVersion = 0, viewing = false, children }) {
   const authenticated = auth?.status === 'authenticated' && typeof auth.profile?.id === 'string';
   const scope = authenticated ? `${auth.profile.id}:${auth.generation}` : null;
@@ -260,18 +262,15 @@ export default function SavedTripsPanel({ auth, onView, onBeginLoad, onEndLoad, 
   };
 
   // PATCH replaces the named fields, so a retry after an unclear reply repeats the same change.
-  const patchTrip = async (id, body) => {
+  // A rename goes through the account's writer, in turn with every other change to that trip.
+  const patchTrip = async (id, title) => {
     const request = startRequest();
     try {
-      const response = await requestJSON(auth, `/saved-trips/${id}`, { method: 'PATCH', body, signal: request.controller.signal });
+      const trip = await writer.update(id, { title });
       if (!isCurrent(request)) return null;
-      const trip = readTrip(response, id);
-      if ((body.title && trip.title !== body.title) || (body.snapshot && !sameData(trip.snapshot, body.snapshot))) {
-        throw new SavedApiError(503, 'INVALID_RESPONSE', 'The change could not be confirmed.');
-      }
       // The list summary counts the stored stops, so it follows the confirmed snapshot too.
       const summary = { title: trip.title, driver_count: trip.snapshot.inputs.drivers.length,
-        passenger_count: trip.snapshot.inputs.passengers.length };
+        passenger_count: trip.snapshot.inputs.passengers.length, ...(trip.updated_at ? { updated_at: trip.updated_at } : {}) };
       setList((old) => ({ ...old, trips: old.trips.map((row) => row.id === id ? { ...row, ...summary } : row) }));
       if (openedRef.current?.id === id) onOpened?.({ ...openedRef.current, title: trip.title });
       return trip;
@@ -285,7 +284,7 @@ export default function SavedTripsPanel({ auth, onView, onBeginLoad, onEndLoad, 
     catch (error) { setActionError('Use a trip name of up to 200 characters.'); throw error; }
     const owner = scope;
     try {
-      const updated = await patchTrip(trip.id, { title: name });
+      const updated = await patchTrip(trip.id, name);
       if (!updated) return;
       setActionSuccess(`Renamed to “${updated.title}”.`);
     } catch (error) {
@@ -307,7 +306,8 @@ export default function SavedTripsPanel({ auth, onView, onBeginLoad, onEndLoad, 
       if (response !== null) throw new Error('Invalid delete response.');
       setList((old) => ({ ...old, trips: old.trips.filter((trip) => trip.id !== id), loading: false }));
       setDeleteId(null); setActionSuccess('Trip deleted.');
-      // The planner must stop updating a trip that no longer exists.
+      // Changes still waiting for the trip are let go, and the planner stops updating it.
+      writer?.forget(id);
       if (openedRef.current?.id === id) onOpened?.(null);
       returnFocus.current = true;
     } catch (error) {

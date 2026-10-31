@@ -15,6 +15,7 @@ export class TripWriteError extends Error {
     this.kind = kind;
     this.status = cause instanceof SavedApiError ? cause.status : 0;
     this.retry = retry;
+    this.cause = cause;
   }
 }
 
@@ -83,10 +84,13 @@ export default function createTripWriter(getAuth) {
     if (change.snapshot !== undefined) body.snapshot = canonicalSnapshot(editsSnapshot ? change.snapshot(current.snapshot) : change.snapshot);
     let title = change.title !== undefined ? canonicalText(change.title, 200, 200) : undefined;
     // An automatic title follows its trip; checked against the title the server has now, so a rename always wins.
-    if (title === undefined && change.follow && current) {
-      title = followTitle(current.title, facts.get(id) || change.follow.before, change.follow.after, current.created_at);
+    // Follow facts can depend on the trip as confirmed now; a function works them out when the write runs.
+    const follow = typeof change.follow === 'function' && current ? change.follow(current, body.snapshot || current.snapshot) : change.follow;
+    if (title === undefined && follow && current) {
+      title = followTitle(current.title, facts.get(id) || follow.before, follow.after, current.created_at);
     }
     if (title !== undefined && title !== current?.title) body.title = title;
+    job.made = follow?.after;
     if (!Object.keys(body).length) return current;
     const saved = readTrip(await requestJSON(getAuth(), `/saved-trips/${id}`, { method: 'PATCH', body }), id);
     if ((body.title && saved.title !== body.title) || (body.snapshot && !sameData(saved.snapshot, body.snapshot))) {
@@ -107,7 +111,7 @@ export default function createTripWriter(getAuth) {
         const saved = create ? await createTrip(job) : await updateTrip(job);
         if (closed) throw new TripWriteError('dropped');
         if (create) failedCreates.delete(id);
-        const made = create ? job.facts : job.change.follow?.after;
+        const made = create ? job.facts : job.made;
         job.resolve(confirm(saved, made));
       } catch (error) {
         if (closed || error instanceof TripWriteError) { job.reject(error instanceof TripWriteError ? error : new TripWriteError('dropped')); continue; }
@@ -150,7 +154,8 @@ export default function createTripWriter(getAuth) {
     },
     /**
      * Changes a saved trip: `snapshot` is a new route or a function editing the confirmed one,
-     * `title` a new name, and `follow` ({ before, after } title facts) lets an automatic title follow.
+     * `title` a new name, and `follow` ({ before, after } title facts, or a function of the confirmed trip
+     * and its new route giving them) lets an automatic title follow.
      * A `slot` lets a newer change of the same kind replace one still waiting.
      */
     update: (id, change, { slot } = {}) => enqueue({ kind: 'update', id, change, slot }),

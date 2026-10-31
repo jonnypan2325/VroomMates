@@ -1,3 +1,4 @@
+import { GLYPHS } from './glyphs';
 import { ROUTE_STYLE } from './routeStyle';
 
 // Map markers are drawn SVG: a car for a driver's start, a numbered disc per pickup, a flag at the destination.
@@ -5,12 +6,7 @@ import { ROUTE_STYLE } from './routeStyle';
 const INK = '#1f2430';
 const { large: LARGE, pickup: PICKUP } = ROUTE_STYLE.markers;
 
-const CAR = 'M5.5 13.5h13M7 13.5l1.4-4.1A1.5 1.5 0 0 1 9.8 8.4h4.4a1.5 1.5 0 0 1 1.4 1l1.4 4.1M6 13.5h12a1 1 0 0 1 1 1V17a1 1 0 0 1-1 1h-.5M6.5 18H6a1 1 0 0 1-1-1v-2.5a1 1 0 0 1 1-1M8.5 18h7';
-const WHEELS = [[8, 18], [16, 18]];
-const FLAG = 'M8 19V5.5M8 6c2.5-1.2 4.5 1.2 8 0v6.5c-3.5 1.2-5.5-1.2-8 0';
-
-/** The same glyph paths drawn inline in the steps list, so the list and the map match. */
-export const GLYPHS = { car: CAR, wheels: WHEELS, flag: FLAG };
+const { car: CAR, wheels: WHEELS, flag: FLAG } = GLYPHS;
 
 // Every marker is anchored at its centre.
 const icon = (svg, size) => {

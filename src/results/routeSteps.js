@@ -41,9 +41,6 @@ export function stepPerson(step) {
   return names.format([...new Set(step.points.map((point) => point.person).filter(Boolean))]);
 }
 
-/** A person's name when the step has one, otherwise the place, so every stop and driver has a name. */
-export const stepName = (step) => stepPerson(step) || stopName(step.point);
-
 const samePlace = (left, right) => left.source?.place_id && left.source.place_id === right.source?.place_id
   && (left.label || '') === (right.label || '');
 

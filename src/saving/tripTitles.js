@@ -10,10 +10,8 @@ const arriveDay = (value) => new Date(Number(value.slice(0, 4)), Number(value.sl
 export const titleFacts = (result) => ({ place: Array.from(shortPlace(result.inputs.destination)).slice(0, 80).join(''),
   arriveBy: validArriveBy(result.inputs.arrive_by) ? result.inputs.arrive_by : '' });
 
-export const titleFromFacts = (facts, now = new Date()) => titleOf(facts.place, facts.arriveBy ? arriveDay(facts.arriveBy) : now);
-
 /** "Trip to BCD Tofu, Oct 22", dated by the arrive-by time when there is one: renamable, and within the 200-character limit. */
-export const automaticTitle = (result, now = new Date()) => titleFromFacts(titleFacts(result), now);
+export const titleFromFacts = (facts, now = new Date()) => titleOf(facts.place, facts.arriveBy ? arriveDay(facts.arriveBy) : now);
 
 /**
  * The title after a change from `before` to `after`. A title that is still automatic, for the old
