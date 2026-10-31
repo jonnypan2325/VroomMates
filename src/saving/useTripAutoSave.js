@@ -1,235 +1,147 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
-import { SavedApiError, canonicalText, newId, requestJSON, sameData } from './api';
-import { canonicalSnapshot, readTrip } from './SavedTripsPanel';
-import { copyTitle, followTitle, titleFacts, titleFromFacts } from './tripTitles';
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
+import { newId } from './api';
+import { copyTitle, titleFacts, titleFromFacts } from './tripTitles';
 
-// After a save, any newer names for the same route are saved next.
-function followLatest(lane, resultId, sent) {
-  const latest = lane.latest;
-  if (!lane.next && latest?.resultId === resultId && latest.snapshot !== sent) lane.next = { ...latest };
-}
-
+const UNSAVABLE = 'This route cannot be saved. Choose a Google place for every stop and calculate again.';
+const noStore = { subscribe: () => () => {}, version: () => 0 };
 
 /**
  * Calculating a route saves it for a signed-in user: the first calculation creates the trip and
- * later ones update it. Saves run one at a time in order, and a failed save never touches the route.
- * `trip` is the trip the planner is working on ({ id, title, opened }); `onTrip` replaces it.
- * `session` changes whenever the planner lets go of its work (Start over, opening another trip, deleting
- * this one): saves still waiting are dropped, and one that lands later is kept for Undo, never attached.
+ * later ones update it, through the account's trip writer. `trip` is the trip the planner is working
+ * on ({ id, opened, facts }); only what the person does sets it, through `onTrip`. A save never moves
+ * the planner to another trip, except that a trip deleted elsewhere lets go of the route.
+ *
+ * Each route's status follows its latest save, so it always ends as saved, not saved with Retry, or
+ * cannot be saved: never "Saving…" once the writer is idle.
  */
-export default function useTripAutoSave({ auth, result, trip, onTrip, onChanged, session = 0 }) {
-  const scope = auth?.status === 'authenticated' && typeof auth.profile?.id === 'string'
-    ? `${auth.profile.id}:${auth.generation}` : null;
-  const live = useRef({ scope, trip, auth, onTrip, onChanged, session });
-  live.current = { scope, trip, auth, onTrip, onChanged, session };
-  // `latest` is the newest snapshot of the route on screen, which a rename can change while a save is under way.
-  const queue = useRef({ scope, session, busy: false, next: null, done: new Set(), retry: null, latest: null, kept: new Map() });
-  const [state, setState] = useState({ scope, resultId: null, phase: 'idle', message: '' });
+export default function useTripAutoSave({ writer, result, trip, onTrip, onChanged }) {
+  const live = useRef({ writer, trip, onTrip, onChanged });
+  live.current = { writer, trip, onTrip, onChanged };
+  const store = writer || noStore;
+  useSyncExternalStore(store.subscribe, store.version);
+  // Per writer: routes saved once already, the planner's latest route for each trip, and new trips whose save failed.
+  const lane = useRef({ writer: null });
+  if (lane.current.writer !== writer) lane.current = { writer, done: new Set(), latest: new Map(), failedCreates: new Map() };
+  const [statuses, setStatuses] = useState({ writer: null, byResult: {} });
 
-  if (queue.current.scope !== scope) {
-    queue.current.rename?.reject(new Error('The account changed.'));
-    queue.current = { scope, session, busy: false, next: null, done: new Set(), retry: null, latest: null, kept: new Map() };
-  }
-  if (queue.current.session !== session) {
-    const lane = queue.current;
-    lane.rename?.reject(new Error('The planner moved on.'));
-    Object.assign(lane, { session, next: null, retry: null, latest: null, rename: null });
-  }
-
-  const report = useCallback((owner, change) => {
-    if (live.current.scope === owner) setState((old) => ({ ...old, scope: owner, ...change }));
-  }, []);
-
-  const send = useCallback(async (job) => {
-    const owner = job.scope;
-    const { auth: account } = live.current;
-    if (job.kind === 'create') {
-      let response;
-      if (job.reconcile) {
-        // An unclear earlier reply may still have committed; the same ID makes the retry safe.
-        try { response = await requestJSON(account, `/saved-trips/${job.body.id}`); } catch (error) {
-          if (!(error instanceof SavedApiError && error.status === 404)) throw error;
-        }
-      }
-      if (!response) response = await requestJSON(account, '/saved-trips', { method: 'POST', body: job.body });
-      const saved = readTrip(response, job.body.id);
-      if (saved.title !== job.body.title || !sameData(saved.snapshot, job.body.snapshot)) {
-        throw new SavedApiError(409, 'TRIP_CONFLICT', 'The saved trip has different content.');
-      }
-      const trip = { id: saved.id, title: saved.title, opened: false, created_at: saved.created_at,
-        ...(saved.updated_at ? { updated_at: saved.updated_at } : {}), facts: job.facts };
-      // A trip saved for a planner session that has since moved on waits for Undo instead.
-      if (live.current.scope === owner && live.current.session !== job.session) queue.current.kept.set(job.session, trip);
-      if (live.current.scope === owner && live.current.session === job.session) {
-        // A save queued behind this one must update this trip, even before the next render.
-        live.current.trip = trip;
-        live.current.onTrip(trip);
-      }
-      return saved;
-    }
-    const response = await requestJSON(account, `/saved-trips/${job.id}`, { method: 'PATCH', body: job.body });
-    const saved = readTrip(response, job.id);
-    if ((job.body.title && saved.title !== job.body.title) || (job.body.snapshot && !sameData(saved.snapshot, job.body.snapshot))) {
-      throw new SavedApiError(503, 'INVALID_RESPONSE', 'The change could not be confirmed.');
-    }
-    if (live.current.scope === owner && live.current.session === job.session && live.current.trip?.id === saved.id) {
-      // Only a save that sent a name changes the one shown; a route save's reply may carry a name from elsewhere.
-      live.current.trip = { ...live.current.trip, ...(job.body.title ? { title: saved.title } : {}),
-        ...(saved.updated_at ? { updated_at: saved.updated_at } : {}), ...(job.facts ? { facts: job.facts } : {}) };
-      live.current.onTrip(live.current.trip);
-    }
-    return saved;
-  }, []);
-
-  const drain = useCallback(async () => {
-    const lane = queue.current;
-    if (lane.busy) return;
-    if (lane.rename) {
-      // A new name waits its turn, so it never crosses a save that also sets the title.
-      const { title, resolve, reject } = lane.rename;
-      lane.rename = null;
-      lane.busy = true;
-      const current = live.current.trip;
-      try {
-        if (!current) throw new Error('This trip is not saved yet.');
-        await send({ scope: lane.scope, session: lane.session, kind: 'update', id: current.id, body: { title } });
-        resolve();
-        if (queue.current === lane) live.current.onChanged?.();
-      } catch (error) { reject(error); } finally {
-        lane.busy = false;
-        if (queue.current === lane) void drain();
-      }
-      return;
-    }
-    if (!lane.next) return;
-    const { resultId, snapshot, asNew, facts, job: prepared } = lane.next;
-    lane.next = null;
-    lane.busy = true;
-    const owner = lane.scope;
-    const current = live.current.trip;
-    let job;
-    try {
-      // The title and the route travel in one save, so they never disagree.
-      const title = current && !asNew && current.facts ? followTitle(current.title, current.facts, facts, current.created_at) : current?.title;
-      job = prepared || (current && !asNew
-        ? { scope: owner, session: lane.session, kind: 'update', id: current.id, facts,
-          body: { ...(title !== current.title ? { title } : {}), snapshot: canonicalSnapshot(snapshot) } }
-        : { scope: owner, session: lane.session, kind: 'create', facts, body: { id: newId(),
-          title: asNew && current ? copyTitle(current.title) : titleFromFacts(facts, new Date()), snapshot: canonicalSnapshot(snapshot) } });
-    } catch (_) {
-      lane.busy = false;
-      report(owner, { resultId, phase: 'unsavable', message: 'This route cannot be saved. Choose a Google place for every stop and calculate again.' });
-      return;
-    }
-    report(owner, { resultId, phase: 'saving', message: '' });
-    try {
-      await send(job);
-      if (queue.current !== lane) return;
-      lane.retry = null;
-      report(owner, { resultId, phase: 'saved', message: '' });
-      live.current.onChanged?.();
-      followLatest(lane, resultId, snapshot);
-    } catch (error) {
-      if (queue.current !== lane || lane.session !== job.session) return;
-      const status = error instanceof SavedApiError ? error.status : 0;
-      // Content the server refuses would only be refused again, so there is no Retry.
-      if ([400, 413, 415].includes(status) || (job.kind === 'update' && status === 409)) {
-        report(owner, { resultId, phase: 'unsavable', message: current && !asNew
+  // Shows how a save ended, unless a newer save for the same route has taken over its status.
+  const track = useCallback((resultId, tripId, promise, { create = false, retryFor }) => {
+    const { writer: owner } = live.current;
+    const own = lane.current;
+    const token = {};
+    const show = (status, only) => setStatuses((old) => {
+      const byResult = old.writer === owner ? old.byResult : {};
+      if (only && byResult[resultId]?.token !== token) return old;
+      return { writer: owner, byResult: { ...byResult, [resultId]: status } };
+    });
+    show({ phase: 'saving', message: '', token });
+    promise.then(() => {
+      own.failedCreates.delete(tripId);
+      const latest = own.latest.get(tripId);
+      if (latest) latest.created = true;
+      show({ phase: 'saved', message: '' }, true);
+      if (live.current.writer === owner) live.current.onChanged?.();
+    }, (error) => {
+      if (live.current.writer !== owner) return;
+      // A change dropped behind a new trip that failed to save shows that failure, with its Retry.
+      if (error.kind === 'dropped') { show(own.failedCreates.get(tripId) || null, true); return; }
+      if (error.kind === 'refused') {
+        show({ phase: 'unsavable', message: own.latest.get(tripId)?.created
           ? 'Your latest changes cannot be saved. Calculate the route again to save it.'
-          : 'This route cannot be saved. Calculate it again to save it.' });
+          : 'This route cannot be saved. Calculate it again to save it.' }, true);
         return;
       }
-      // A trip deleted elsewhere lets go of the route, so Retry saves it as a new trip.
-      if (job.kind === 'update' && status === 404 && live.current.trip?.id === job.id) {
-        live.current.trip = null;
-        live.current.onTrip(null);
-      }
-      // A definite rejection starts over with a new ID; anything unclear retries this exact save.
-      const definite = [404, 409].includes(status);
-      lane.retry = { resultId, snapshot, asNew, facts, job: definite ? null : { ...job, reconcile: job.kind === 'create' } };
-      report(owner, { resultId, phase: 'error', message: status === 401 ? 'Your sign-in expired.' : '' });
-    } finally {
-      lane.busy = false;
-      if (queue.current === lane) void drain();
-    }
-  }, [report, send]);
+      if (error.kind === 'detached' && live.current.trip?.id === tripId) live.current.onTrip(null);
+      const status = { phase: 'error', message: error.status === 401 ? 'Your sign-in expired.' : '', retry: retryFor(error) };
+      if (create) own.failedCreates.set(tripId, status);
+      show(status, true);
+    });
+    return promise;
+  }, []);
 
-  const enqueue = useCallback((request) => {
-    queue.current.next = request;
-    queue.current.latest = { resultId: request.resultId, snapshot: request.snapshot, facts: request.facts };
-    void drain();
-  }, [drain]);
+  // A new trip for a route: its ID becomes the planner's trip at once, so later changes queue behind it.
+  const saveNew = useCallback((route, copyOf = null) => {
+    if (!live.current.writer || !route?.snapshot) return;
+    const id = newId();
+    const facts = titleFacts(route);
+    const title = copyOf ? copyTitle(copyOf.title) : titleFromFacts(facts);
+    lane.current.latest.set(id, { route, snapshot: route.snapshot, facts, sentFacts: facts, created: false, edited: false });
+    live.current.onTrip({ id, title, opened: false, facts });
+    sendCreate(route.id, id, live.current.writer.create({ id, title, snapshot: route.snapshot, facts }));
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Retry of a new trip resends exactly what may already have been saved, then any change made since.
+  function sendCreate(resultId, tripId, promise) {
+    track(resultId, tripId, promise, { create: true, retryFor: (error) => () => {
+      const own = lane.current;
+      const latest = own.latest.get(tripId);
+      // Its ID turned out to be taken: save the route again as a new trip.
+      if (error.kind === 'conflict' || error.kind === 'detached' || !error.retry) { saveNew(latest.route); return; }
+      own.failedCreates.delete(tripId);
+      sendCreate(resultId, tripId, error.retry().then((saved) => (latest.edited ? live.current.writer.update(tripId,
+        { snapshot: latest.snapshot, follow: { before: latest.sentFacts, after: latest.facts } }, { slot: 'planner' }) : saved)));
+    } });
+  }
+
+  // The planner's latest route for a trip, as one change that a newer one replaces while it waits.
+  const sendLatest = useCallback((resultId, tripId) => {
+    const latest = lane.current.latest.get(tripId);
+    const before = latest.sentFacts;
+    latest.sentFacts = latest.facts;
+    track(resultId, tripId, live.current.writer.update(tripId, { snapshot: latest.snapshot,
+      ...(before ? { follow: { before, after: latest.facts } } : {}) }, { slot: 'planner' }),
+    { retryFor: (error) => (error.kind === 'detached' ? () => saveNew(latest.route) : () => sendLatest(resultId, tripId)) });
+  }, [track, saveNew]);
+
+  // The route changed for the trip the planner holds: remember it and send it.
+  const queueRoute = useCallback((route) => {
+    const own = lane.current;
+    const current = live.current.trip;
+    if (!live.current.writer || !current || !route?.snapshot) return false;
+    const previous = own.latest.get(current.id);
+    own.latest.set(current.id, { route, snapshot: route.snapshot, facts: titleFacts(route), edited: true,
+      sentFacts: previous ? previous.sentFacts : current.facts, created: previous ? previous.created : true });
+    // A new trip whose save failed keeps the change for its Retry.
+    if (!own.failedCreates.has(current.id)) sendLatest(route.id, current.id);
+    return true;
+  }, [sendLatest]);
 
   useEffect(() => {
-    const lane = queue.current;
-    if (!scope || !result || result.origin !== 'calculated' || lane.done.has(result.id)) return;
-    lane.done.add(result.id);
+    const own = lane.current;
+    if (!writer || !result || result.origin !== 'calculated' || own.done.has(result.id)) return;
+    own.done.add(result.id);
     if (!result.snapshot) {
-      report(scope, { resultId: result.id, phase: 'unsavable', message: result.saveError });
+      setStatuses((old) => ({ writer, byResult: { ...(old.writer === writer ? old.byResult : {}),
+        [result.id]: { phase: 'unsavable', message: result.saveError || UNSAVABLE } } }));
       return;
     }
-    enqueue({ resultId: result.id, snapshot: result.snapshot, facts: titleFacts(result) });
-  }, [scope, result, enqueue, report]);
+    if (!queueRoute(result)) saveNew(result);
+  }, [writer, result, queueRoute, saveNew]);
 
-  // Retry resends a save whose outcome is unclear exactly as it was, or builds a refused one again.
-  const retry = useCallback(() => {
-    const lane = queue.current;
-    const failed = lane.retry;
-    if (!failed || lane.busy) return;
-    lane.retry = null;
-    enqueue(failed);
-  }, [enqueue]);
-
-  // Undo of Start over returns to a planner session; a trip saved for it meanwhile becomes its trip again.
-  useEffect(() => {
-    const lane = queue.current;
-    const kept = lane.kept.get(session);
-    if (!kept || live.current.trip) return;
-    lane.kept.delete(session);
-    live.current.trip = kept;
-    live.current.onTrip(kept);
-  }, [session]);
-
+  const known = writer && trip ? writer.known(trip.id) : null;
+  const shown = known ? { ...trip, title: known.title } : null;
+  // New names, or a new arrive-by time, update the trip saved for this route.
+  const saveEdits = useCallback((next) => { queueRoute(next); }, [queueRoute]);
+  const saveAgain = useCallback(() => saveNew(result), [saveNew, result]);
   const saveAsNew = useCallback(() => {
-    if (!result?.snapshot || !live.current.trip) return;
-    enqueue({ resultId: result.id, snapshot: result.snapshot, asNew: true, facts: titleFacts(result) });
-  }, [result, enqueue]);
+    const { writer: current, trip: held } = live.current;
+    const copied = current && held ? current.known(held.id) : null;
+    if (copied) saveNew(result, copied);
+  }, [saveNew, result]);
+  const rename = useCallback(async (text) => {
+    const { writer: current, trip: held } = live.current;
+    if (!current || !held) return;
+    await current.update(held.id, { title: text });
+    live.current.onChanged?.();
+  }, []);
 
-  const saveAgain = useCallback(() => {
-    if (!result?.snapshot) return;
-    enqueue({ resultId: result.id, snapshot: result.snapshot, facts: titleFacts(result) });
-  }, [result, enqueue]);
-
-  // New names, or a new arrive-by time, update the trip saved for this route, or the save still under way.
-  const saveEdits = useCallback((next) => {
-    const lane = queue.current;
-    if (!scope || !next?.snapshot) return;
-    // A queued "Save as new trip" stays a copy.
-    const request = { resultId: next.id, snapshot: next.snapshot, facts: titleFacts(next),
-      asNew: lane.next?.resultId === next.id && lane.next.asNew };
-    if (live.current.trip || lane.busy || lane.next) { enqueue(request); return; }
-    lane.latest = request;
-    // A failed first save retries with the names as they are now.
-    if (lane.retry && !lane.retry.job && lane.retry.resultId === next.id) lane.retry = { ...lane.retry, snapshot: next.snapshot, facts: request.facts };
-  }, [scope, enqueue]);
-
-  const rename = useCallback((next) => new Promise((resolve, reject) => {
-    const lane = queue.current;
-    if (!live.current.trip && !lane.busy) { resolve(); return; }
-    const title = canonicalText(next, 200, 200);
-    // A newer name replaces one still waiting.
-    lane.rename?.resolve();
-    lane.rename = { title, resolve, reject };
-    void drain();
-  }), [drain]);
-
-  const active = state.scope === scope && state.resultId === result?.id ? state : null;
+  const status = statuses.writer === writer && result ? statuses.byResult[result.id] : null;
   let phase = 'idle';
-  if (result && !scope) phase = 'signed-out';
-  else if (result && active) phase = active.phase;
-  else if (result && trip) phase = 'saved';
-  else if (result) phase = 'unsaved';
+  if (result && !writer) phase = 'signed-out';
+  else if (result && status) phase = status.phase;
+  else if (result) phase = shown ? 'saved' : 'unsaved';
   // A saved trip deleted from My trips leaves its route here, unsaved.
-  if (phase === 'saved' && !trip) phase = 'unsaved';
-  return { phase, message: active?.message || '', trip, retry, rename, saveAsNew, saveAgain, saveEdits };
+  if (phase === 'saved' && !shown) phase = 'unsaved';
+  const retry = useCallback(() => status?.retry?.(), [status]);
+  return { phase, message: status?.message || '', trip: shown, retry, rename, saveAsNew, saveAgain, saveEdits };
 }

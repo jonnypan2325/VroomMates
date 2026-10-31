@@ -1,10 +1,11 @@
-import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import AddressInput from './components/AddressInput';
 import SavedTripsPanel, { canonicalSnapshot, editedDate, readTrip } from './saving/SavedTripsPanel';
 import { SavedApiError, canonicalText, newId, requestJSON } from './saving/api';
 import InlineEdit from './saving/InlineEdit';
 import TripSaveStatus from './saving/TripSaveStatus';
 import useSavedLocations from './saving/useSavedLocations';
+import createTripWriter from './saving/tripWriter';
 import useTripAutoSave from './saving/useTripAutoSave';
 import { copyTitle, followTitle, titleFacts } from './saving/tripTitles';
 import RouteResults from './results/RouteResults';
@@ -161,10 +162,6 @@ export default function LocationInput({ map, auth }) {
   const [error, setError] = useState('');
   const [activeView, setActiveView] = useState('plan');
   const [openedTrip, setOpenedTrip] = useState(null);
-  // A new planner session each time the planner lets go of its work, so saves queued for it never reach other work.
-  const sessions = useRef(0);
-  const [plannerSession, setPlannerSession] = useState(0);
-  const newSession = () => setPlannerSession(sessions.current += 1);
   const [cleared, setCleared] = useState(null);
   const scrollPane = useRef(null);
   const addDriverButton = useRef(null);
@@ -185,16 +182,18 @@ export default function LocationInput({ map, auth }) {
   const selected = selection.id && selection.id === mapResult?.id ? selection.index : null;
   const selectDriver = (index) => setSelection({ id: mapResult?.id || null, index });
   const route = useRouteMap(map, mapResult, selected, mapAttempt);
-  const autoSave = useTripAutoSave({ auth, result: privateStale ? null : result, trip: openedTrip, session: plannerSession,
+  // One writer per signed-in account saves every change to its trips; a new account gets a new one,
+  // and the old one lets go of anything still waiting.
+  const scope = auth.status === 'authenticated' && typeof auth.profile?.id === 'string' ? authKey : null;
+  const authRef = useRef(auth);
+  authRef.current = auth;
+  const writer = useMemo(() => (scope ? createTripWriter(() => authRef.current) : null), [scope]);
+  const writerRef = useRef(writer);
+  writerRef.current = writer;
+  useEffect(() => () => { if (writerRef.current !== writer) writer?.close(); }, [writer]);
+  const autoSave = useTripAutoSave({ writer: privateStale ? null : writer, result: privateStale ? null : result, trip: openedTrip,
     // A saved trip is private, so the planner holding it clears when the account changes.
-    onTrip: (trip) => {
-      privateOwner.current = authKey;
-      setOpenedTrip(trip);
-      // A new title, and the time of the edit, show in the open trip too. A trip deleted elsewhere arrives as null.
-      if (!trip) return;
-      setViewedTrip((view) => view?.trip.id === trip.id && (view.trip.title !== trip.title || view.trip.updated_at !== trip.updated_at)
-        ? { ...view, trip: { ...view.trip, title: trip.title, ...(trip.updated_at ? { updated_at: trip.updated_at } : {}) } } : view);
-    },
+    onTrip: (trip) => { privateOwner.current = authKey; setOpenedTrip(trip); },
     onChanged: () => setListVersion((version) => version + 1) });
 
   const invalidate = useCallback(() => {
@@ -269,10 +268,9 @@ export default function LocationInput({ map, auth }) {
 
   // Clears the planner (and any opened trip) but never saved trips or locations; Undo restores it.
   const startOver = () => {
-    const before = { drivers, passengers, destination, arriveBy, result, openedTrip, session: plannerSession };
+    const before = { drivers, passengers, destination, arriveBy, result, openedTrip };
     invalidate(); setError('');
     setOpenedTrip(null);
-    newSession();
     setDrivers([newDriver()]);
     setPassengers([newPassengerPickup()]);
     setDestination(newPoint());
@@ -290,7 +288,6 @@ export default function LocationInput({ map, auth }) {
     setArriveBy(cleared.arriveBy);
     setResult(cleared.result);
     setOpenedTrip(cleared.openedTrip);
-    setPlannerSession(cleared.session);
   };
   const filled = (point) => Boolean(point.address.trim() || point.source);
   const dirty = Boolean(result || drivers.length !== 1 || passengers.length !== 1
@@ -383,6 +380,7 @@ export default function LocationInput({ map, auth }) {
         (placeId) => resolvePlace(map, placeId, { signal: controller.signal }), complete);
       if (!current(captured)) throw abortError();
       privateOwner.current = captured.owner;
+      writerRef.current?.remember(trip);
       setViewedTrip({ trip, result: restored, linksPending: !complete });
       scrollPane.current?.scrollTo({ top: 0 });
     } finally {
@@ -401,7 +399,6 @@ export default function LocationInput({ map, auth }) {
     setArriveBy(restored.inputs.arrive_by || '');
     setResult(restored);
     setOpenedTrip({ id: trip.id, title: trip.title, opened: true, created_at: trip.created_at, facts: titleFacts(restored) });
-    newSession();
     setViewedTrip(null);
     setActiveView('plan');
     viewButtons.current.plan?.focus();
@@ -609,7 +606,7 @@ export default function LocationInput({ map, auth }) {
           <div className="planner-scroll" ref={scrollPane} tabIndex="0" aria-label="Planner content">
           <div id="planner-panel-plan" role="tabpanel" aria-labelledby="planner-tab-plan" hidden={activeView !== 'plan'}>
           {openedTrip?.opened && auth.status === 'authenticated' ? <div className="editing-trip">
-            <p>Editing <strong>{openedTrip.title}</strong></p>
+            <p>Editing <strong>{autoSave.trip?.title || openedTrip.title}</strong></p>
             <button type="button" className="text-button" onClick={startOver}>Start over</button>
           </div> : null}
           <SectionHeading title="Drivers" done={placed(drivers)} column="Seats" />
@@ -704,7 +701,7 @@ export default function LocationInput({ map, auth }) {
           </div>
           <SavedTripsPanel auth={auth} activeView={activeView} openedTrip={openedTrip}
             // Deleting the trip the planner holds also drops its waiting saves, so it never comes back.
-            onOpened={(trip) => { if (!trip) newSession(); setOpenedTrip(trip); }}
+            onOpened={(trip) => { if (!trip && openedTrip) writer?.forget(openedTrip.id); setOpenedTrip(trip); }}
             listVersion={listVersion} viewing={!!viewedTrip}
             onBeginLoad={beginLoad} onEndLoad={endLoad} onView={viewTrip}>
             {viewedTrip && <TripView key={viewedTrip.trip.id} view={viewedTrip} route={route} selected={selected} onSelect={selectDriver} busy={busy}
