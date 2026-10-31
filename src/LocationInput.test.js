@@ -5,16 +5,27 @@ import LocationInput from './LocationInput';
 import { resolvePlace } from './saving/places';
 
 jest.mock('./saving/places', () => ({ ...jest.requireActual('./saving/places'), resolvePlace: jest.fn() }));
-const mockHome = { id: 'saved-home', label: 'Home', source: { kind: 'google_places', place_id: 'home' } };
+const mockHome = { id: '44444444-4444-4444-8444-444444444444', label: 'Home', source: { kind: 'google_places', place_id: 'home' } };
 const mockSaved = { locations: [mockHome], loading: false, error: null, save: jest.fn(), remove: jest.fn(), edit: jest.fn() };
 jest.mock('./saving/useSavedLocations', () => () => ({
   locations: mockSaved.locations, loading: mockSaved.loading, error: mockSaved.error, refresh: jest.fn().mockResolvedValue(),
   save: (...args) => mockSaved.save(...args), remove: (...args) => mockSaved.remove(...args), edit: (...args) => mockSaved.edit(...args),
 }));
-jest.mock('./saving/SavedTripsPanel', () => function TripBoundary({ snapshot, openedTrip, onOpened }) {
-  return <><output data-testid="frozen-trip">{JSON.stringify(snapshot)}</output>
-    <button type="button" onClick={() => onOpened({ id: 'fixture-trip', title: 'Friday dinner' })}>Fixture opens trip</button>
-    <output data-testid="opened-trip">{openedTrip ? openedTrip.title : ''}</output></>;
+// My trips stands in as two buttons: one opens a trip into the planner, one shows the fixture trip read-only.
+const mockTrip = { current: null };
+jest.mock('./saving/SavedTripsPanel', () => {
+  const actual = jest.requireActual('./saving/SavedTripsPanel');
+  function TripBoundary({ openedTrip, onOpened, onView, onBeginLoad, onEndLoad, viewing, children }) {
+    const view = async () => {
+      const token = onBeginLoad();
+      try { await onView(mockTrip.current, token); } finally { onEndLoad(token); }
+    };
+    return <><button type="button" onClick={() => onOpened({ id: 'fixture-trip', title: 'Friday dinner', opened: true })}>Fixture opens trip</button>
+      <button type="button" onClick={() => { view().catch(() => {}); }}>Fixture views trip</button>
+      <output data-testid="opened-trip">{openedTrip ? openedTrip.title : ''}</output>
+      {viewing && children}</>;
+  }
+  return { __esModule: true, ...actual, default: TripBoundary };
 });
 // Saved choices stand in for the field's own suggestion list; the nickname shows what a named row displays.
 jest.mock('./components/AddressInput', () => function AddressFixture({ label, value, nickname, onChange, action, savedLocations = [], onSavedSelect }) {
@@ -31,13 +42,41 @@ beforeAll(() => {
   global.TextEncoder = TextEncoder;
   Object.defineProperty(globalThis, 'crypto', { configurable: true, value: require('crypto').webcrypto });
 });
-const auth = { status: 'authenticated', generation: 1, profile: { id: 'fixture-a' } };
 const deferred = () => { let resolve; const promise = new Promise((yes) => { resolve = yes; }); return { promise, resolve }; };
-let renderer, map, directionsCallbacks;
+const STAMP = '2026-10-29T12:00:00Z';
+const reply = (status, body) => ({ ok: status >= 200 && status < 300, status, json: async () => body });
+// Saved trips in memory, answering like the API; `fail` rejects that many writes with 503.
+function tripServer() {
+  const server = { trips: new Map(), writes: [], fail: 0 };
+  server.protectedRequest = jest.fn(async (path, options = {}) => {
+    const method = options.method || 'GET';
+    const body = options.body ? JSON.parse(options.body) : null;
+    const id = path.split('?')[0].split('/')[2];
+    if (method !== 'GET') server.writes.push({ method, id: id || body.id, body });
+    if (method !== 'GET' && server.fail > 0) { server.fail -= 1; return reply(503, { error: { code: 'STORE_UNAVAILABLE' } }); }
+    if (method === 'POST') {
+      const trip = { id: body.id, title: body.title, created_at: STAMP, snapshot: body.snapshot };
+      server.trips.set(trip.id, trip);
+      return reply(201, { trip });
+    }
+    const trip = server.trips.get(id);
+    if (method === 'PATCH') {
+      if (!trip) return reply(404, { error: { code: 'NOT_FOUND' } });
+      Object.assign(trip, body.title ? { title: body.title } : {}, body.snapshot ? { snapshot: body.snapshot } : {});
+      return reply(200, { trip });
+    }
+    if (id) return trip ? reply(200, { trip }) : reply(404, { error: { code: 'NOT_FOUND' } });
+    return reply(200, { trips: [], next_cursor: null });
+  });
+  return server;
+}
+let auth, server, map, directionsCallbacks;
 beforeEach(() => {
   global.fetch = jest.fn();
   Element.prototype.scrollTo = jest.fn();
-  renderer = { set: jest.fn(), setDirections: jest.fn() };
+  window.requestAnimationFrame = (callback) => setTimeout(callback, 0);
+  server = tripServer();
+  auth = { status: 'authenticated', generation: 1, profile: { id: 'fixture-a' }, protectedRequest: server.protectedRequest };
   map = {};
   directionsCallbacks = [];
   window.google = { maps: { TravelMode: { DRIVING: 'DRIVING' }, DirectionsService: class {
@@ -50,7 +89,7 @@ beforeEach(() => {
   mockSaved.save.mockReset(); mockSaved.remove.mockReset(); mockSaved.edit.mockReset();
 });
 afterEach(() => { delete global.fetch; delete window.google; });
-function show(props = {}) { return render(<LocationInput auth={auth} map={map} directionsRenderer={renderer} {...props} />); }
+function show(props = {}) { return render(<LocationInput auth={auth} map={map} {...props} />); }
 function fill(label, value) { fireEvent.change(screen.getByLabelText(label), { target: { value } }); }
 function fillTrip(count = 3) {
   fill('Driver 1 passenger seats', String(count));
@@ -67,17 +106,36 @@ const calculate = () => fireEvent.click(calculateButton());
 // A saved choice starts an async place lookup; async act settles it before assertions.
 async function settle(fire) { await act(async () => { fire(); }); }
 const useSaved = (field) => settle(() => fireEvent.click(screen.getByRole('button', { name: `Use Home for ${field}` })));
+const saved = () => screen.findByText('Saved as', { exact: false });
+// After a save the status line settles on "Saved as"; waiting for it keeps later updates inside the test.
+const settled = () => waitFor(() => {
+  expect(screen.queryByText('Saving…')).not.toBeInTheDocument();
+  expect(screen.getByText('Saved as', { exact: false })).toBeInTheDocument();
+});
+const lastWrite = () => server.writes[server.writes.length - 1];
+// A lone driver's card header is plain text, not a button.
+const cardName = () => screen.getByText((_, element) => element.classList?.contains('driver-card-name'));
+// Google answers a directions request with one leg per stop after the first.
+const directions = (...minutes) => ({ routes: [{ legs: minutes.map((value) => ({ duration: { value: value * 60 } })), overview_path: [] }] });
+async function rename(button, field, text) {
+  fireEvent.doubleClick(screen.getByRole('button', { name: button }));
+  const input = screen.getByRole('textbox', { name: field });
+  fireEvent.change(input, { target: { value: text } });
+  await settle(() => fireEvent.keyDown(input, { key: 'Enter' }));
+}
 
-test('a pickup count sends individual people and saving retains the calculated result after edits', async () => {
+test('a pickup count sends individual people, and the route saves once and stays after edits', async () => {
   show(); fillTrip(); fetch.mockResolvedValue(responseFor(3)); calculate();
   await screen.findByRole('heading', {name:'Your route'});
   expect(JSON.parse(fetch.mock.calls[0][1].body).passengers).toEqual(Array(3).fill({lat:4,lng:4}));
-  const snapshot = JSON.parse(screen.getByTestId('frozen-trip').textContent);
+  await saved();
+  expect(server.writes).toHaveLength(1);
+  const { snapshot } = server.writes[0].body;
   expect(snapshot.inputs.passengers).toHaveLength(3);
   expect(new Set(snapshot.inputs.passengers.map(p => p.stop_id)).size).toBe(3);
   expect(JSON.stringify(snapshot)).not.toContain('coordinates');
   fill('Passengers at pickup 1', '1'); fill('Pickup 1 location', 'Changed');
-  expect(JSON.parse(screen.getByTestId('frozen-trip').textContent)).toEqual(snapshot);
+  expect(server.writes).toHaveLength(1);
   expect(screen.getByRole('heading', { name: 'Your route' })).toBeInTheDocument();
 });
 
@@ -144,21 +202,25 @@ test('account change clears private saved-place form data and grouped counts', a
   await useSaved('Pickup 1 location');
   expect(screen.getByLabelText('Pickup 1 location')).toHaveValue('Private home');
   fill('Passengers at pickup 1','3');
-  view.rerender(<LocationInput auth={{...auth,profile:{id:'fixture-b'},generation:2}} map={map} directionsRenderer={renderer}/>);
+  view.rerender(<LocationInput auth={{...auth,profile:{id:'fixture-b'},generation:2}} map={map}/>);
   expect(screen.getByLabelText('Pickup 1 location')).toHaveValue('');
   expect(screen.getByLabelText('Passengers at pickup 1')).toHaveValue(1);
   expect(screen.queryByText(/nickname: Home/)).not.toBeInTheDocument();
 });
 
-test('late map callback cannot replace directions for a newer calculation', async () => {
+test('late map callback cannot replace drive times for a newer calculation', async () => {
   show(); fillTrip(2); fetch.mockResolvedValue(responseFor(2)); calculate();
   await screen.findByRole('heading',{name:'Your route'});
-  expect(directionsCallbacks).toHaveLength(1);
+  await saved();
+  await waitFor(() => expect(directionsCallbacks).toHaveLength(1));
   fill('Passengers at pickup 1','1'); fetch.mockResolvedValue(responseFor(1)); calculate();
   await waitFor(() => expect(directionsCallbacks).toHaveLength(2));
-  act(() => directionsCallbacks[1]({route:'new'},'OK'));
-  act(() => directionsCallbacks[0]({route:'old'},'OK'));
-  expect(renderer.setDirections.mock.calls).toEqual([[{route:'new'}]]);
+  await act(async () => directionsCallbacks[1](directions(1, 1),'OK'));
+  await act(async () => directionsCallbacks[0](directions(10, 10, 10),'OK'));
+  expect(screen.getByText(/1 of 2 seats/)).toHaveTextContent('2 min drive');
+  expect(screen.queryByText(/30 min drive/)).not.toBeInTheDocument();
+  await waitFor(() => expect(server.writes).toHaveLength(2));
+  await settled();
 });
 
 test('rows put the address first, then the count, then remove, and new drivers start with four seats', () => {
@@ -210,7 +272,7 @@ test('Calculate stays focusable while places are missing, names them and leads t
 test('Start over clears fields and route but no saved data, and Undo restores them until the next edit', async () => {
   show(); fillTrip(); fetch.mockResolvedValue(responseFor(3)); calculate();
   await screen.findByRole('heading', { name: 'Your route' });
-  const snapshot = screen.getByTestId('frozen-trip').textContent;
+  await saved();
   fireEvent.click(screen.getByRole('button', { name: 'Start over' }));
   expect(screen.getByText('Planner cleared.')).toHaveAttribute('role', 'status');
   expect(screen.getByLabelText('Driver 1 location')).toHaveValue('');
@@ -218,12 +280,11 @@ test('Start over clears fields and route but no saved data, and Undo restores th
   expect(screen.getByLabelText('Passengers at pickup 1')).toHaveValue(1);
   expect(screen.getByLabelText('Destination')).toHaveValue('');
   expect(screen.queryByRole('heading', { name: 'Your route' })).not.toBeInTheDocument();
-  expect(screen.getByTestId('frozen-trip')).toHaveTextContent('null');
   fireEvent.click(screen.getByRole('button', { name: 'Undo' }));
   expect(screen.getByLabelText('Driver 1 location')).toHaveValue('Origin');
   expect(screen.getByLabelText('Passengers at pickup 1')).toHaveValue(3);
   expect(screen.getByRole('heading', { name: 'Your route' })).toBeInTheDocument();
-  expect(screen.getByTestId('frozen-trip').textContent).toBe(snapshot);
+  expect(screen.getByText('Saved as', { exact: false })).toBeInTheDocument();
   expect(screen.queryByRole('button', { name: 'Undo' })).not.toBeInTheDocument();
   fireEvent.click(screen.getByRole('button', { name: 'Start over' }));
   fill('Destination', 'Another destination');
@@ -231,6 +292,7 @@ test('Start over clears fields and route but no saved data, and Undo restores th
   expect(screen.queryByText('Planner cleared.')).not.toBeInTheDocument();
   expect(screen.getByLabelText('Driver 1 location')).toHaveValue('');
   expect(fetch).toHaveBeenCalledTimes(1);
+  expect(server.writes).toHaveLength(1);
   expect(mockSaved.save).not.toHaveBeenCalled();
   expect(mockSaved.remove).not.toHaveBeenCalled();
   expect(mockSaved.edit).not.toHaveBeenCalled();
@@ -290,7 +352,7 @@ test('an account change ends the chance to undo Start over, so private fields ca
   await useSaved('Pickup 1 location');
   fireEvent.click(screen.getByRole('button', { name: 'Start over' }));
   expect(screen.getByRole('button', { name: 'Undo' })).toBeInTheDocument();
-  view.rerender(<LocationInput auth={{ ...auth, profile: { id: 'fixture-b' }, generation: 2 }} map={map} directionsRenderer={renderer} />);
+  view.rerender(<LocationInput auth={{ ...auth, profile: { id: 'fixture-b' }, generation: 2 }} map={map} />);
   expect(screen.queryByRole('button', { name: 'Undo' })).not.toBeInTheDocument();
   expect(screen.queryByText('Planner cleared.')).not.toBeInTheDocument();
   expect(screen.getByLabelText('Pickup 1 location')).toHaveValue('');
@@ -300,7 +362,7 @@ test('rows picked from My locations follow its later rename, move and deletion, 
   resolvePlace.mockResolvedValue({ address: 'Old home address', coordinates: { lat: 1, lng: 1 }, place_name: '',
     source: mockHome.source });
   const view = show();
-  const again = () => view.rerender(<LocationInput auth={auth} map={map} directionsRenderer={renderer} />);
+  const again = () => view.rerender(<LocationInput auth={auth} map={map} />);
   await useSaved('Driver 1 location');
   expect(screen.getByText('Driver 1 location nickname: Home')).toBeInTheDocument();
   mockSaved.locations = [{ ...mockHome, label: 'Home base' }];
@@ -322,25 +384,25 @@ test('rows picked from My locations follow its later rename, move and deletion, 
   expect(screen.getByLabelText('Driver 1 location')).toHaveValue('New home address');
 });
 
-test('a saved trip keeps only the nickname and place reference, never the landmark name or saved-location link', async () => {
+test('a saved trip keeps the nickname, place reference and saved-location link, never the landmark name', async () => {
   resolvePlace.mockResolvedValue({ address: 'Home address', coordinates: { lat: 1, lng: 1 }, place_name: 'Synthetic Landmark',
     source: mockHome.source });
   show();
   await useSaved('Driver 1 location');
   fill('Pickup 1 location', 'Pickup'); fill('Destination', 'Destination');
   fetch.mockResolvedValue(responseFor(1)); calculate();
-  await screen.findByRole('heading', { name: 'Your route' });
-  const snapshot = screen.getByTestId('frozen-trip').textContent;
-  expect(JSON.parse(snapshot).inputs.drivers[0]).toEqual(expect.objectContaining({ label: 'Home', source: mockHome.source }));
+  await saved();
+  const snapshot = JSON.stringify(server.writes[0].body.snapshot);
+  expect(server.writes[0].body.snapshot.inputs.drivers[0]).toEqual(expect.objectContaining({ label: 'Home', source: mockHome.source,
+    location_id: mockHome.id }));
   expect(snapshot).not.toContain('Synthetic Landmark');
   expect(snapshot).not.toContain('saved_id');
-  expect(snapshot).not.toContain('saved-home');
 });
 
 test('a failed list refresh still passes on a confirmed rename, but never unlinks a row', async () => {
   resolvePlace.mockResolvedValue({ address: 'Home address', coordinates: { lat: 1, lng: 1 }, place_name: '', source: mockHome.source });
   const view = show();
-  const again = () => view.rerender(<LocationInput auth={auth} map={map} directionsRenderer={renderer} />);
+  const again = () => view.rerender(<LocationInput auth={auth} map={map} />);
   await useSaved('Driver 1 location');
   mockSaved.error = 'My locations could not be refreshed.';
   mockSaved.locations = [{ ...mockHome, label: 'Home base' }];
@@ -361,10 +423,9 @@ test('a saved place that moves clears a calculated route through it, so it is ca
   const moved = { kind: 'google_places', place_id: 'new-home' };
   resolvePlace.mockResolvedValue({ address: 'New home address', coordinates: { lat: 2, lng: 2 }, place_name: '', source: moved });
   mockSaved.locations = [{ ...mockHome, source: moved }];
-  await act(async () => { view.rerender(<LocationInput auth={auth} map={map} directionsRenderer={renderer} />); });
+  await act(async () => { view.rerender(<LocationInput auth={auth} map={map} />); });
   await waitFor(() => expect(screen.getByLabelText('Driver 1 location')).toHaveValue('New home address'));
   expect(screen.queryByRole('heading', { name: 'Your route' })).not.toBeInTheDocument();
-  expect(screen.getByTestId('frozen-trip')).toHaveTextContent('null');
   expect(screen.getByRole('alert')).toHaveTextContent('A saved place in this route moved');
 });
 
@@ -385,8 +446,151 @@ test('a saved place that moves clears a route through it even when its new place
   await screen.findByRole('heading', { name: 'Your route' });
   resolvePlace.mockRejectedValue(new Error('Places timed out'));
   mockSaved.locations = [{ ...mockHome, source: { kind: 'google_places', place_id: 'new-home' } }];
-  await act(async () => { view.rerender(<LocationInput auth={auth} map={map} directionsRenderer={renderer} />); });
+  await act(async () => { view.rerender(<LocationInput auth={auth} map={map} />); });
   expect(screen.queryByRole('heading', { name: 'Your route' })).not.toBeInTheDocument();
-  expect(screen.getByTestId('frozen-trip')).toHaveTextContent('null');
   expect(screen.getByRole('alert')).toHaveTextContent('A saved place in this route moved');
+});
+
+test('calculating saves the trip, a later calculation updates it, and Start over begins a new one', async () => {
+  show(); fillTrip(1); fetch.mockResolvedValue(responseFor(1)); calculate();
+  await saved();
+  expect(server.writes[0]).toMatchObject({ method: 'POST', body: { title: expect.stringMatching(/^Trip to Destination, \S/) } });
+  expect(screen.getByRole('button', { name: /^Trip name: Trip to Destination/ })).toBeInTheDocument();
+  calculate();
+  await waitFor(() => expect(server.writes).toHaveLength(2));
+  await settled();
+  expect(server.writes[1]).toMatchObject({ method: 'PATCH', id: server.writes[0].id });
+  expect(server.trips.size).toBe(1);
+  fireEvent.click(screen.getByRole('button', { name: 'Start over' }));
+  fillTrip(1); calculate();
+  await waitFor(() => expect(server.writes).toHaveLength(3));
+  await settled();
+  expect(server.writes[2].method).toBe('POST');
+  expect(server.trips.size).toBe(2);
+});
+
+test('signed out, a calculated route offers sign-in and saves nothing', async () => {
+  const signIn = jest.fn();
+  show({ auth: { status: 'anonymous', generation: 1, signIn, signInReady: true } });
+  fillTrip(1); fetch.mockResolvedValue(responseFor(1)); calculate();
+  fireEvent.click(await screen.findByRole('button', { name: 'Sign in to save this trip' }));
+  expect(signIn).toHaveBeenCalled();
+  expect(server.protectedRequest).not.toHaveBeenCalled();
+});
+
+test('a first save that fails says so, keeps the route, and Retry saves it under the same ID', async () => {
+  server.fail = 1;
+  show(); fillTrip(1); fetch.mockResolvedValue(responseFor(1)); calculate();
+  expect(await screen.findByText('It is not in My trips yet.')).toBeInTheDocument();
+  expect(screen.getByRole('heading', { name: 'Your route' })).toBeInTheDocument();
+  await settle(() => fireEvent.click(screen.getByRole('button', { name: 'Retry' })));
+  await saved();
+  expect(server.writes.map((write) => write.method)).toEqual(['POST', 'POST']);
+  expect(server.writes[1].id).toBe(server.writes[0].id);
+  expect(server.trips.size).toBe(1);
+});
+
+test('names typed on the route are saved with the trip and kept through Recalculate, without new directions', async () => {
+  show(); fillTrip(1); fetch.mockResolvedValue(responseFor(1)); calculate();
+  await saved();
+  const requests = directionsCallbacks.length;
+  await rename(/^Who is at the start: none, showing Origin/, 'Who is at the start', 'Sam');
+  await waitFor(() => expect(lastWrite().body.snapshot.inputs.drivers[0].person).toBe('Sam'));
+  await settled();
+  expect(cardName()).toHaveTextContent('Sam from Origin');
+  await rename(/^Destination name: none/, 'Destination name', 'Dinner');
+  await waitFor(() => expect(lastWrite().body.snapshot.inputs.destination.label).toBe('Dinner'));
+  await settled();
+  expect(directionsCallbacks).toHaveLength(requests);
+  const writes = server.writes.length;
+  calculate();
+  await waitFor(() => expect(server.writes.length).toBe(writes + 1));
+  expect(lastWrite()).toMatchObject({ method: 'PATCH' });
+  expect(lastWrite().body.snapshot.inputs.drivers[0].person).toBe('Sam');
+  expect(lastWrite().body.snapshot.inputs.destination.label).toBe('Dinner');
+  await settled();
+});
+
+test('with no map yet drive times are loading, never unavailable; Maps without directions is unavailable', async () => {
+  const view = show({ map: null }); fillTrip(1); fetch.mockResolvedValue(responseFor(1)); calculate();
+  await saved();
+  expect(await screen.findByText('Loading drive times…')).toBeInTheDocument();
+  expect(screen.queryByText('Directions are unavailable.')).not.toBeInTheDocument();
+  await settled();
+  view.unmount();
+  window.google = { maps: {} };
+  show(); fillTrip(1); calculate();
+  await saved();
+  expect(await screen.findByText('Directions are unavailable.')).toBeInTheDocument();
+  await settled();
+});
+
+// A saved trip whose driver was picked from My locations, which has since moved.
+const TRIP_ID = '55555555-5555-4555-8555-555555555555';
+const PLACES = { home: 1, 'new-home': 2, mia: 4, bcd: 9 };
+function savedTrip() {
+  const source = (place_id) => ({ kind: 'google_places', place_id });
+  const snapshot = { schema_version: 1, inputs: {
+    drivers: [{ stop_id: 'd1', label: 'Home', source: source('home'), location_id: mockHome.id, capacity: 2 }],
+    passengers: [{ stop_id: 'p1', label: '', source: source('mia') }],
+    destination: { stop_id: 'end', label: 'BCD Tofu', source: source('bcd') } },
+  routes: [{ driver_id: 'd1', stop_ids: ['d1', 'p1', 'end'] }] };
+  mockTrip.current = { id: TRIP_ID, title: 'Friday dinner', created_at: STAMP, snapshot };
+  server.trips.set(TRIP_ID, JSON.parse(JSON.stringify(mockTrip.current)));
+  mockSaved.locations = [{ ...mockHome, source: source('new-home') }];
+  resolvePlace.mockImplementation(async (_, placeId) => ({ address: placeId + ' address', place_name: '',
+    source: source(placeId), coordinates: { lat: PLACES[placeId], lng: PLACES[placeId] } }));
+}
+async function viewTrip() {
+  fireEvent.click(screen.getByRole('tab', { name: 'My trips' }));
+  await settle(() => fireEvent.click(screen.getByRole('button', { name: 'Fixture views trip' })));
+  return screen.findByRole('heading', { name: 'Friday dinner' });
+}
+
+test('a saved trip opens read-only, follows its moved location, and names the stop that moved', async () => {
+  savedTrip(); show();
+  await viewTrip();
+  expect(screen.getByText('Home has moved.')).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Recalculate' })).toBeInTheDocument();
+  expect(screen.getByText('Moved')).toBeInTheDocument();
+  expect(screen.getByText('new-home address')).toBeInTheDocument();
+  expect(server.writes).toHaveLength(0);
+});
+
+test('a name typed in a saved trip saves to it straight away, keeping the stored place and link', async () => {
+  savedTrip(); show();
+  await viewTrip();
+  await rename(/^Who is at pickup 1/, 'Who is at pickup 1', 'Mia');
+  expect(lastWrite()).toMatchObject({ method: 'PATCH', id: TRIP_ID });
+  const stored = server.trips.get(TRIP_ID).snapshot.inputs;
+  expect(stored.passengers[0].person).toBe('Mia');
+  expect(stored.drivers[0]).toMatchObject({ location_id: mockHome.id, source: { place_id: 'home' } });
+  expect(screen.getByRole('button', { name: /^Who is at pickup 1: Mia/ })).toBeInTheDocument();
+});
+
+test('a name that cannot be saved in a saved trip says so and keeps the old name', async () => {
+  savedTrip(); show();
+  await viewTrip();
+  server.fail = 1;
+  await rename(/^Who is at pickup 1/, 'Who is at pickup 1', 'Mia');
+  expect(screen.getByRole('alert')).toHaveTextContent('The name was not saved. Check your connection and try again.');
+  expect(screen.getByRole('button', { name: /^Who is at pickup 1: none/ })).toBeInTheDocument();
+  expect(server.trips.get(TRIP_ID).snapshot.inputs.passengers[0]).not.toHaveProperty('person');
+});
+
+test('a trip open in the planner saves names from its read-only view through the planner, showing a failure there', async () => {
+  savedTrip(); show();
+  await viewTrip();
+  fireEvent.click(screen.getByRole('button', { name: 'Edit in planner' }));
+  expect(await screen.findByText('Editing', { exact: false })).toHaveTextContent('Editing Friday dinner');
+  await viewTrip();
+  server.fail = 1;
+  await rename(/^Who is at the start/, 'Who is at the start', 'Jonathan');
+  expect(await screen.findByText('Your latest changes are not in My trips yet.')).toBeInTheDocument();
+  expect(server.trips.get(TRIP_ID).snapshot.inputs.drivers[0]).not.toHaveProperty('person');
+  await settle(() => fireEvent.click(screen.getByRole('button', { name: 'Retry' })));
+  await waitFor(() => expect(server.trips.get(TRIP_ID).snapshot.inputs.drivers[0].person).toBe('Jonathan'));
+  expect(server.trips.size).toBe(1);
+  fireEvent.click(screen.getByRole('tab', { name: 'Plan trip' }));
+  expect(cardName()).toHaveTextContent('Jonathan from Home');
 });

@@ -1,5 +1,6 @@
 import { TextEncoder } from 'util';
-import { expandPassengerPickups, freezeInputs, groupPassengerPickups, makeResult, newPassengerPickup, reopenSnapshot, resizePickup } from './tripSnapshot';
+import { expandPassengerPickups, freezeInputs, groupPassengerPickups, makeResult, nameChange, newPassengerPickup, renameInResult,
+  renamePoints, reopenSnapshot, resizePickup } from './tripSnapshot';
 
 beforeAll(() => {
   global.TextEncoder = TextEncoder;
@@ -95,4 +96,109 @@ it.each(['duplicate', 'missing', 'invalid-coordinate', 'lookup-failure'])('rejec
     return { coordinates: { lat: kind === 'invalid-coordinate' ? 91 : 0, lng: 0 } };
   });
   await expect(reopenSnapshot(snapshot, lookup)).rejects.toThrow();
+});
+
+// Trips that follow My locations, and the names people give stops on one trip.
+const HOME = '11111111-1111-4111-8111-111111111111';
+const OFFICE = '22222222-2222-4222-8222-222222222222';
+const GONE = '33333333-3333-4333-8333-333333333333';
+const linkedResult = () => {
+  const inputs = fixture();
+  inputs.drivers[0].saved_id = HOME;
+  inputs.passengers.forEach((row) => { row.saved_id = OFFICE; });
+  inputs.destination.saved_id = 'not-a-uuid';
+  return makeResult(inputs, routesFor(inputs));
+};
+// A plain function: the test setup resets jest.fn implementations before each test.
+const fresh = async (placeId) => ({ address: 'Fresh ' + placeId, coordinates: { lat: 0, lng: 0 } });
+
+it('saves the saved-location ID of a stop picked from My locations, never a malformed one', () => {
+  const { snapshot } = linkedResult();
+  expect(snapshot.inputs.drivers[0].location_id).toBe(HOME);
+  expect(snapshot.inputs.passengers.map((row) => row.location_id)).toEqual([OFFICE, OFFICE]);
+  expect(snapshot.inputs.destination).not.toHaveProperty('location_id');
+  expect(snapshot.inputs.drivers[1]).not.toHaveProperty('location_id');
+  expect(JSON.stringify(snapshot)).not.toContain('saved_id');
+});
+
+it('reopens linked stops against the owner\'s locations: moved, deleted, foreign, or list not loaded', async () => {
+  const { snapshot } = linkedResult();
+  const owner = [{ id: HOME, label: 'Home base', source: { kind: 'google_places', place_id: 'new-home' } },
+    { id: OFFICE, label: 'Team', source: { kind: 'google_places', place_id: 'shared' } }];
+  const moved = await reopenSnapshot(snapshot, fresh, owner);
+  expect(moved.changed).toBe(true);
+  expect(moved.moved).toEqual(['d1']);
+  expect(moved.inputs.drivers[0]).toMatchObject({ label: 'Home base', saved_id: HOME, source: { place_id: 'new-home' }, address: 'Fresh new-home' });
+  expect(moved.inputs.passengers[0]).toMatchObject({ saved_id: OFFICE, label: 'Team' });
+  expect(moved.assignments).toEqual(snapshot.routes.map((route) => route.stop_ids));
+  // Deleted, or never this owner's: the stored place and label, unlinked.
+  const missing = await reopenSnapshot(snapshot, fresh, [{ id: GONE, label: 'Other', source: { kind: 'google_places', place_id: 'x' } }]);
+  expect(missing.changed).toBe(false);
+  expect(missing.inputs.drivers[0]).toMatchObject({ label: '', saved_id: null, source: { place_id: 'd1' } });
+  expect(missing.inputs.passengers[0]).toMatchObject({ label: 'Team', saved_id: null });
+  // Unknown list: the stored place, with the link kept for later.
+  const unknown = await reopenSnapshot(snapshot, fresh, null);
+  expect(unknown.changed).toBe(false);
+  expect(unknown.inputs.drivers[0]).toMatchObject({ saved_id: HOME, source: { place_id: 'd1' } });
+});
+
+it('keeps person names through saving and reopening, even when a linked place is refreshed', async () => {
+  const inputs = fixture();
+  inputs.drivers[0].person = '  Sam ';
+  inputs.drivers[0].saved_id = HOME;
+  inputs.passengers.forEach((row) => { row.person = 'Mia and Alex'; });
+  inputs.destination.person = 'Not a person';
+  const { snapshot } = makeResult(inputs, routesFor(inputs));
+  expect(snapshot.inputs.drivers[0].person).toBe('Sam');
+  expect(snapshot.inputs.passengers.map((row) => row.person)).toEqual(['Mia and Alex', 'Mia and Alex']);
+  expect(snapshot.inputs.destination).not.toHaveProperty('person');
+  const reopened = await reopenSnapshot(snapshot, fresh,
+    [{ id: HOME, label: 'Home base', source: { kind: 'google_places', place_id: 'new-home' } }]);
+  expect(reopened.inputs.drivers[0]).toMatchObject({ person: 'Sam', label: 'Home base' });
+});
+
+it('groups planner pickups by person too, so differently named people at one place stay separate rows', () => {
+  const rows = [point('p1', 1, 'same', 'Team'), point('p2', 1, 'same', 'Team'), point('p3', 1, 'same', 'Team')];
+  rows[0].person = 'Mia'; rows[1].person = 'Mia'; rows[2].person = 'Alex';
+  expect(groupPassengerPickups(rows).map((row) => [row.person, row.count])).toEqual([['Mia', 2], ['Alex', 1]]);
+});
+
+it('renames people without moving a stop, and clears a name with empty text', () => {
+  const result = linkedResult();
+  const named = renameInResult(result, nameChange({ stopIds: ['p1', 'p2'] }, ' Mia and Alex '));
+  expect(named.id).toBe(result.id);
+  expect(named.coordinates).toBe(result.coordinates);
+  expect(named.assignments).toBe(result.assignments);
+  expect(named.inputs.passengers.map((row) => row.person)).toEqual(['Mia and Alex', 'Mia and Alex']);
+  expect(named.snapshot.inputs.passengers.map((row) => row.person)).toEqual(['Mia and Alex', 'Mia and Alex']);
+  expect(named.snapshot.routes).toEqual(result.snapshot.routes);
+  const cleared = renameInResult(named, nameChange({ stopIds: ['p1'] }, '   '));
+  expect(cleared.inputs.passengers[0]).not.toHaveProperty('person');
+  expect(cleared.snapshot.inputs.passengers[0]).not.toHaveProperty('person');
+  expect(cleared.inputs.passengers[1].person).toBe('Mia and Alex');
+});
+
+it('renames planner rows through any of a pickup\'s people', () => {
+  const row = { ...newPassengerPickup(), count: 2 };
+  row.occurrenceIds = [row.stop_id, 'second'];
+  const [renamed] = renamePoints([row], { stopIds: ['second'], person: 'Lee' });
+  expect(renamed.person).toBe('Lee');
+  expect(renamePoints([row], { destination: 'Dinner' })[0]).toBe(row);
+});
+
+it('renames only this trip\'s destination, unlinking it at the place shown', () => {
+  const inputs = fixture(); inputs.destination.saved_id = HOME;
+  const result = makeResult(inputs, routesFor(inputs));
+  const shown = { ...result, inputs: { ...result.inputs, destination: { ...result.inputs.destination, source: { kind: 'google_places', place_id: 'shown' } } } };
+  const renamed = renameInResult(shown, nameChange({ destination: true }, 'Dinner'));
+  expect(renamed.inputs.destination).toMatchObject({ label: 'Dinner', saved_id: null });
+  expect(renamed.snapshot.inputs.destination).toEqual({ stop_id: 'end', label: 'Dinner', source: { kind: 'google_places', place_id: 'shown' } });
+});
+
+it('refuses to rename a destination that has moved until the route is calculated again', () => {
+  const result = { ...linkedResult(), moved: ['end'] };
+  expect(() => nameChange({ destination: true }, 'Dinner', result)).toThrow('Recalculate before renaming');
+  expect(nameChange({ stopIds: ['p1'] }, 'Mia', result)).toEqual({ stopIds: ['p1'], person: 'Mia' });
+  expect(nameChange({ destination: true }, 'Dinner', { ...result, moved: ['d1'] })).toEqual({ destination: 'Dinner' });
+  expect(() => nameChange({ stopIds: ['p1'] }, 'x'.repeat(81))).toThrow();
 });
