@@ -41,14 +41,13 @@ function showInfoWindow(map, message) {
 }
 
 /**
- * Creates the Google Map once the Maps script has loaded, and returns it along
- * with the DirectionsRenderer attached to it. The script tag in index.html is
+ * Creates the Google Map once the Maps script has loaded, and returns it.
+ * Routes draw themselves on it. The script tag in index.html is
  * `async defer`, so it may not be ready when this first runs; deferred scripts
  * always execute before 'load', which makes that a safe fallback signal.
  */
 export default function useGoogleMap(containerId) {
   const [map, setMap] = useState(null);
-  const [directionsRenderer, setDirectionsRenderer] = useState(null);
 
   useEffect(() => {
     const initMap = () => {
@@ -56,12 +55,9 @@ export default function useGoogleMap(containerId) {
       if (!container || !window.google) return;
 
       const mapInstance = new window.google.maps.Map(container, MAP_OPTIONS);
-      const renderer = new window.google.maps.DirectionsRenderer();
-      renderer.setMap(mapInstance);
       addCurrentLocationControl(mapInstance);
 
       setMap(mapInstance);
-      setDirectionsRenderer(renderer);
     };
 
     if (window.google) {
@@ -74,5 +70,5 @@ export default function useGoogleMap(containerId) {
     return () => window.removeEventListener('load', initMap);
   }, [containerId]);
 
-  return { map, directionsRenderer };
+  return map;
 }

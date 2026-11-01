@@ -120,6 +120,13 @@ def saved_errors(feature):
     return decorate
 
 
+def parse_stamp(stamp):
+    """A stored time as the API returns it: UTC to the microsecond at most, ending in "Z"."""
+    if not isinstance(stamp, str) or not re.fullmatch(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?Z', stamp):
+        raise ValueError()
+    return datetime.fromisoformat(stamp.replace('Z', '+00:00'))
+
+
 def _cursor_pair(pair):
     if not isinstance(pair, (tuple, list)) or len(pair) != 2 or not isinstance(pair[0], str) or len(pair[0]) > 40:
         raise ValueError()
