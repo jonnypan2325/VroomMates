@@ -13,6 +13,7 @@ from backend.saved_trips import validate_snapshot
 import tests.test_auth as auth_fixture
 
 STAMP = '2030-01-01T00:00:00.000000Z'
+EDITED = '2030-01-02T08:30:00.000000Z'
 
 
 def payload(ident=None, passengers=2):
@@ -50,7 +51,7 @@ class FakeTripStore:
             if {k: existing[k] for k in record} != record:
                 raise SaveConflict('record')
             return copy.deepcopy(existing), False
-        self.rows[key] = dict(copy.deepcopy(record), created_at=STAMP)
+        self.rows[key] = dict(copy.deepcopy(record), created_at=STAMP, updated_at=STAMP)
         if self.lose_after_commit:
             self.lose_after_commit = False
             raise StoreUnavailable()
@@ -71,7 +72,10 @@ class FakeTripStore:
         summaries = [{'id': row['id'], 'title': row['title'], 'created_at': row['created_at'],
                       'schema_version': row['snapshot']['schema_version'],
                       'driver_count': len(row['snapshot']['inputs']['drivers']),
-                      'passenger_count': len(row['snapshot']['inputs']['passengers'])}
+                      'passenger_count': len(row['snapshot']['inputs']['passengers']),
+                      **({'updated_at': row['updated_at']} if 'updated_at' in row else {}),
+                      # The store keeps a copy of the arrive-by time beside each trip for the list.
+                      **({'arrive_by': row['snapshot']['inputs']['arrive_by']} if 'arrive_by' in row['snapshot']['inputs'] else {})}
                      for row in rows[:limit]]
         next_cursor = (summaries[-1]['created_at'], summaries[-1]['id']) if len(rows) > limit else None
         if self.override is not None:
@@ -86,7 +90,7 @@ class FakeTripStore:
         self.called('update', owner)
         if (owner, ident) not in self.rows:
             raise SavedNotFound()
-        self.rows[owner, ident].update(copy.deepcopy(changes))
+        self.rows[owner, ident].update(copy.deepcopy(changes), updated_at=EDITED)
         return copy.deepcopy(self.override or self.rows[owner, ident])
 
 
@@ -134,7 +138,7 @@ class SavedTripTests(unittest.TestCase):
         response = self.call('POST', json=value)
         self.assertEqual(response.status_code, 201)
         trip = response.json['trip']
-        self.assertEqual(set(trip), {'id', 'title', 'created_at', 'snapshot'})
+        self.assertEqual(set(trip), {'id', 'title', 'created_at', 'updated_at', 'snapshot'})
         self.assertEqual(trip['title'], 'Fixture trip')
         self.assertEqual(trip['snapshot']['inputs']['passengers'][0]['label'], 'Café')
         self.assertEqual(trip['snapshot']['inputs']['destination']['label'], '')
@@ -238,7 +242,7 @@ class SavedTripTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         row = response.json['trips'][0]
         self.assertEqual(row['id'], max(ids))
-        self.assertEqual(set(row), {'id', 'title', 'created_at', 'schema_version', 'driver_count', 'passenger_count'})
+        self.assertEqual(set(row), {'id', 'title', 'created_at', 'updated_at', 'schema_version', 'driver_count', 'passenger_count'})
         cursor = response.json['next_cursor']
         page = self.call('GET', '/saved-trips?limit=1&cursor=' + cursor)
         self.assertEqual(page.json['trips'][0]['id'], sorted(ids, reverse=True)[1])
@@ -284,6 +288,227 @@ class SavedTripTests(unittest.TestCase):
             value = payload(); value['snapshot']['inputs']['destination']['label'] = bad
             self.assert_error(self.call('POST', json=value), 400, 'INVALID_SNAPSHOT')
         self.assertEqual(self.store.calls, [])
+
+    def test_optional_saved_location_id_round_trips_on_any_stop(self):
+        home, office = str(uuid.uuid4()), str(uuid.uuid4())
+        value = payload()
+        inputs = value['snapshot']['inputs']
+        inputs['drivers'][0]['location_id'] = home
+        inputs['passengers'][0]['location_id'] = office
+        inputs['passengers'][1]['location_id'] = office  # One saved place may be two pickups.
+        inputs['destination']['location_id'] = home
+        response = self.call('POST', json=value)
+        self.assertEqual(response.status_code, 201)
+        saved = response.json['trip']['snapshot']['inputs']
+        self.assertEqual([row['location_id'] for row in saved['drivers'] + saved['passengers']],
+                         [home, office, office])
+        self.assertEqual(saved['destination']['location_id'], home)
+        self.assertEqual(self.call('GET', '/saved-trips/' + value['id']).json['trip'], response.json['trip'])
+        patched = payload(value['id'])
+        patched['snapshot']['inputs']['passengers'][1]['location_id'] = home
+        result = self.call('PATCH', '/saved-trips/' + value['id'], json={'snapshot': patched['snapshot']})
+        self.assertEqual(result.status_code, 200)
+        points = result.json['trip']['snapshot']['inputs']['passengers']
+        self.assertNotIn('location_id', points[0])
+        self.assertEqual(points[1]['location_id'], home)
+
+    def test_trip_without_saved_location_ids_is_unchanged(self):
+        normalized = validate_snapshot(payload()['snapshot'])
+        inputs = normalized['inputs']
+        for row in inputs['drivers'] + inputs['passengers'] + [inputs['destination']]:
+            self.assertNotIn('location_id', row)
+        value = payload()
+        value['snapshot']['inputs']['passengers'][0]['location_id'] = str(uuid.uuid4())
+        mixed = validate_snapshot(value['snapshot'])['inputs']
+        self.assertNotIn('location_id', mixed['passengers'][1])
+        self.assertNotIn('location_id', mixed['destination'])
+
+    def test_saved_location_id_must_be_a_canonical_v4_uuid(self):
+        ident = str(uuid.uuid4())
+        for bad in [None, '', 3, True, {}, [ident], ident.upper(), ident.replace('-', ''),
+                    ' ' + ident, str(uuid.uuid1()), 'x' * 36, '00000000-0000-0000-0000-000000000000']:
+            for target in ['drivers', 'passengers', 'destination']:
+                value = payload(); inputs = value['snapshot']['inputs']
+                row = inputs[target] if target == 'destination' else inputs[target][0]
+                row['location_id'] = bad
+                self.assert_error(self.call('POST', json=value), 400, 'INVALID_SNAPSHOT')
+        self.assertEqual(self.store.calls, [])
+
+    def test_saved_location_id_only_on_stops_and_other_fields_still_rejected(self):
+        ident = str(uuid.uuid4())
+        for field in ['saved_location_id', 'locationId', 'location', 'location_label']:
+            value = payload(); value['snapshot']['inputs']['passengers'][0][field] = ident
+            self.assert_error(self.call('POST', json=value), 400, 'INVALID_SNAPSHOT')
+        for target in ['snapshot', 'inputs', 'source', 'route']:
+            value = payload(); snap = value['snapshot']
+            obj = {'snapshot': snap, 'inputs': snap['inputs'],
+                   'source': snap['inputs']['passengers'][0]['source'], 'route': snap['routes'][0]}[target]
+            obj['location_id'] = ident
+            self.assert_error(self.call('POST', json=value), 400, 'INVALID_SNAPSHOT')
+        self.assertEqual(self.store.calls, [])
+
+    def test_optional_person_name_round_trips_on_drivers_and_pickups(self):
+        home = str(uuid.uuid4())
+        value = payload()
+        inputs = value['snapshot']['inputs']
+        inputs['drivers'][0].update(person='  Sam ', location_id=home)
+        inputs['passengers'][0]['person'] = 'Mia and Alex'
+        inputs['passengers'][1]['person'] = 'Zoë'  # Decomposed, stored composed.
+        response = self.call('POST', json=value)
+        self.assertEqual(response.status_code, 201)
+        saved = response.json['trip']['snapshot']['inputs']
+        self.assertEqual([row['person'] for row in saved['drivers'] + saved['passengers']],
+                         ['Sam', 'Mia and Alex', 'Zoë'])
+        self.assertEqual((saved['drivers'][0]['label'], saved['drivers'][0]['location_id']), ('Fixture driver', home))
+        self.assertNotIn('person', saved['destination'])
+        self.assertEqual(self.call('GET', '/saved-trips/' + value['id']).json['trip'], response.json['trip'])
+        renamed = copy.deepcopy(response.json['trip']['snapshot'])
+        del renamed['inputs']['passengers'][0]['person']
+        renamed['inputs']['drivers'][0]['person'] = 'Samantha'
+        result = self.call('PATCH', '/saved-trips/' + value['id'], json={'snapshot': renamed})
+        self.assertEqual(result.status_code, 200)
+        points = result.json['trip']['snapshot']['inputs']
+        self.assertEqual(points['drivers'][0]['person'], 'Samantha')
+        self.assertNotIn('person', points['passengers'][0])
+        self.assertEqual(points['passengers'][1]['person'], 'Zoë')
+        unnamed = validate_snapshot(payload()['snapshot'])['inputs']
+        for row in unnamed['drivers'] + unnamed['passengers'] + [unnamed['destination']]:
+            self.assertNotIn('person', row)
+
+    def test_person_name_is_short_non_empty_text(self):
+        self.assertEqual(self.call('POST', json=self.named('x' * 80)).status_code, 201)
+        self.assertEqual(self.call('POST', json=self.named('\U00010348' * 80)).status_code, 201)
+        for bad in [None, '', '   ', 3, True, ['Sam'], {'name': 'Sam'}, 'x' * 81,
+                    'x\x00y', 'x\ud800', '\nSam', 'Sam‎']:
+            for target in ['drivers', 'passengers']:
+                self.assert_error(self.call('POST', json=self.named(bad, target)), 400, 'INVALID_SNAPSHOT')
+
+    def test_person_name_only_on_drivers_and_pickups_and_other_fields_still_rejected(self):
+        value = payload(); value['snapshot']['inputs']['destination']['person'] = 'Sam'
+        self.assert_error(self.call('POST', json=value), 400, 'INVALID_SNAPSHOT')
+        for field in ['person_name', 'name', 'people', 'driver_name', 'nickname']:
+            value = payload(); value['snapshot']['inputs']['drivers'][0][field] = 'Sam'
+            self.assert_error(self.call('POST', json=value), 400, 'INVALID_SNAPSHOT')
+        for target in ['snapshot', 'inputs', 'source', 'route']:
+            value = payload(); snap = value['snapshot']
+            obj = {'snapshot': snap, 'inputs': snap['inputs'],
+                   'source': snap['inputs']['drivers'][0]['source'], 'route': snap['routes'][0]}[target]
+            obj['person'] = 'Sam'
+            self.assert_error(self.call('POST', json=value), 400, 'INVALID_SNAPSHOT')
+        self.assertEqual(self.store.calls, [])
+
+    def test_optional_arrive_by_round_trips_and_can_be_changed_or_removed(self):
+        value = payload()
+        value['snapshot']['inputs']['arrive_by'] = '2026-11-01T18:30'
+        response = self.call('POST', json=value)
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.json['trip']['snapshot']['inputs']['arrive_by'], '2026-11-01T18:30')
+        self.assertEqual(self.call('GET', '/saved-trips/' + value['id']).json['trip'], response.json['trip'])
+        later = copy.deepcopy(response.json['trip']['snapshot'])
+        later['inputs']['arrive_by'] = '2026-11-02T07:05'
+        result = self.call('PATCH', '/saved-trips/' + value['id'], json={'snapshot': later})
+        self.assertEqual(result.status_code, 200)
+        self.assertEqual(result.json['trip']['snapshot']['inputs']['arrive_by'], '2026-11-02T07:05')
+        del later['inputs']['arrive_by']
+        cleared = self.call('PATCH', '/saved-trips/' + value['id'], json={'snapshot': later})
+        self.assertNotIn('arrive_by', cleared.json['trip']['snapshot']['inputs'])
+        self.assertNotIn('arrive_by', validate_snapshot(payload()['snapshot'])['inputs'])
+
+    def test_arrive_by_is_a_real_local_date_and_time_in_one_exact_format(self):
+        for good in ['2000-01-01T00:00', '2100-12-31T23:59', '2028-02-29T12:00']:
+            value = payload(); value['snapshot']['inputs']['arrive_by'] = good
+            self.assertEqual(validate_snapshot(value['snapshot'])['inputs']['arrive_by'], good)
+        for bad in [None, '', 3, True, ['2026-11-01T18:30'], '2026-02-30T10:00', '2027-02-29T10:00',
+                    '2026-11-01T24:00', '2026-11-01T18:60', '2026-11-01T18:30:00', '2026-11-01T18:30Z',
+                    '2026-11-01T18:30+01:00', '2026-11-01 18:30', '2026-11-01t18:30', '2026-1-01T18:30',
+                    '2026-11-01T8:30', ' 2026-11-01T18:30', '2026-11-01T18:30 ', '1999-12-31T23:59',
+                    '2101-01-01T00:00', '٢٠٢٦-11-01T18:30', '2026-11-01']:
+            value = payload(); value['snapshot']['inputs']['arrive_by'] = bad
+            self.assert_error(self.call('POST', json=value), 400, 'INVALID_SNAPSHOT')
+        self.assertEqual(self.store.calls, [])
+
+    def test_arrive_by_only_in_inputs_and_other_fields_still_rejected(self):
+        for field in ['arriveBy', 'arrive_at', 'arrival', 'depart_at']:
+            value = payload(); value['snapshot']['inputs'][field] = '2026-11-01T18:30'
+            self.assert_error(self.call('POST', json=value), 400, 'INVALID_SNAPSHOT')
+        for target in ['snapshot', 'driver', 'passenger', 'destination', 'route']:
+            value = payload(); snap = value['snapshot']
+            obj = {'snapshot': snap, 'driver': snap['inputs']['drivers'][0], 'passenger': snap['inputs']['passengers'][0],
+                   'destination': snap['inputs']['destination'], 'route': snap['routes'][0]}[target]
+            obj['arrive_by'] = '2026-11-01T18:30'
+            self.assert_error(self.call('POST', json=value), 400, 'INVALID_SNAPSHOT')
+        self.assertEqual(self.store.calls, [])
+
+    def test_list_carries_the_arrive_by_time_only_for_trips_that_have_one(self):
+        timed, plain = payload(), payload()
+        timed['snapshot']['inputs']['arrive_by'] = '2026-10-30T19:00'
+        self.call('POST', json=timed); self.call('POST', json=plain)
+        listed = lambda: {row['id']: row for row in self.call('GET').json['trips']}
+        rows = listed()
+        self.assertEqual(rows[timed['id']]['arrive_by'], '2026-10-30T19:00')
+        self.assertNotIn('arrive_by', rows[plain['id']])
+        self.assertEqual(set(rows[plain['id']]), {'id', 'title', 'created_at', 'updated_at', 'schema_version', 'driver_count', 'passenger_count'})
+        self.call('PATCH', '/saved-trips/' + timed['id'], json={'title': 'Friday dinner'})
+        self.assertEqual(listed()[timed['id']]['arrive_by'], '2026-10-30T19:00')
+        self.call('PATCH', '/saved-trips/' + timed['id'], json={'snapshot': payload(timed['id'])['snapshot']})
+        self.assertNotIn('arrive_by', listed()[timed['id']])
+
+    def test_a_malformed_listed_arrive_by_never_reaches_the_response(self):
+        value = payload(); value['snapshot']['inputs']['arrive_by'] = '2026-10-30T19:00'
+        self.call('POST', json=value)
+        summaries, _ = self.store.list_trips('google:synthetic-account-a', 50)
+        for bad in [None, '', 3, '2026-02-30T10:00', '2026-10-30T19:00Z', '2026-10-30 19:00', '1999-12-31T23:59']:
+            self.store.override = ([dict(summaries[0], arrive_by=bad)], None)
+            response = self.call('GET')
+            self.assert_error(response, 500, 'SAVED_TRIP_UNREADABLE')
+            self.assertNotIn('arrive_by', response.get_data(as_text=True))
+
+    def test_a_trip_says_when_it_was_last_edited(self):
+        value = payload()
+        created = self.call('POST', json=value).json['trip']
+        self.assertEqual(created['updated_at'], created['created_at'])
+        self.assertEqual(self.call('GET').json['trips'][0]['updated_at'], STAMP)
+        for change in [{'title': 'Friday dinner'}, {'snapshot': value['snapshot']}, {'title': 'Dinner', 'snapshot': value['snapshot']}]:
+            self.rows_edit(value['id'], STAMP)
+            edited = self.call('PATCH', '/saved-trips/' + value['id'], json=change).json['trip']
+            self.assertEqual((edited['created_at'], edited['updated_at']), (STAMP, EDITED))
+            self.assertEqual(self.call('GET', '/saved-trips/' + value['id']).json['trip'], edited)
+            self.assertEqual(self.call('GET').json['trips'][0]['updated_at'], EDITED)
+
+    def rows_edit(self, ident, stamp):
+        self.store.rows['google:synthetic-account-a', ident]['updated_at'] = stamp
+
+    def test_a_trip_saved_before_edit_times_still_reads_and_lists_without_one(self):
+        value = payload()
+        self.call('POST', json=value)
+        del self.store.rows['google:synthetic-account-a', value['id']]['updated_at']
+        detail = self.call('GET', '/saved-trips/' + value['id'])
+        self.assertEqual(detail.status_code, 200)
+        self.assertEqual(set(detail.json['trip']), {'id', 'title', 'created_at', 'snapshot'})
+        self.assertEqual(set(self.call('GET').json['trips'][0]),
+                         {'id', 'title', 'created_at', 'schema_version', 'driver_count', 'passenger_count'})
+
+    def test_a_malformed_or_early_edit_time_or_unknown_field_never_reaches_the_response(self):
+        value = payload()
+        self.call('POST', json=value)
+        trip = self.store.get_trip('google:synthetic-account-a', value['id'])
+        summaries, _ = self.store.list_trips('google:synthetic-account-a', 50)
+        for bad in [None, '', 3, '2030-01-01 00:00:00.000000Z', '2030-01-01T00:00:00.000000+01:00',
+                    '2029-12-31T23:59:59.999999Z', 'yesterday']:
+            self.store.override = dict(trip, updated_at=bad)
+            self.assert_error(self.call('GET', '/saved-trips/' + value['id']), 500, 'SAVED_TRIP_UNREADABLE')
+            self.store.override = ([dict(summaries[0], updated_at=bad)], None)
+            self.assert_error(self.call('GET'), 500, 'SAVED_TRIP_UNREADABLE')
+        self.store.override = dict(trip, edited_at=STAMP)
+        self.assert_error(self.call('GET', '/saved-trips/' + value['id']), 500, 'SAVED_TRIP_UNREADABLE')
+        self.store.override = ([dict(summaries[0], edited_at=STAMP)], None)
+        self.assert_error(self.call('GET'), 500, 'SAVED_TRIP_UNREADABLE')
+
+    @staticmethod
+    def named(person, target='passengers'):
+        value = payload()
+        value['snapshot']['inputs'][target][0]['person'] = person
+        return value
 
     def test_route_occurrence_driver_capacity_and_shape_rejections(self):
         cases = []

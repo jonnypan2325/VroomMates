@@ -27,3 +27,6 @@ code {
   font-family: source-code-pro, Menlo, Monaco, Consolas, 'Courier New',
     monospace;
 }
+
+/* Shown in place of the app if it fails to render. */
+.app-error { margin: 48px auto; max-width: 32rem; padding: 0 16px; font-size: 1rem; color: #1f2430; }

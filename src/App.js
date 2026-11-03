@@ -12,7 +12,7 @@ const MAP_CONTAINER_ID = 'map';
 function App() {
 
   const isStacked = useMediaQuery(MOBILE_QUERY);
-  const { map, directionsRenderer } = useGoogleMap(MAP_CONTAINER_ID);
+  const map = useGoogleMap(MAP_CONTAINER_ID);
   const auth = useGoogleProfile();
   const { containerRef, panelStyle, startResizing } = useResizablePanels(isStacked);
 
@@ -32,7 +32,6 @@ function App() {
 
           <LocationInput
             map={map}
-            directionsRenderer={directionsRenderer}
             auth={auth}
           />
         </div>

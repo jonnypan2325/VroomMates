@@ -15,7 +15,6 @@
 .planner-location { margin-bottom: 12px; min-width: 0; }
 .planner-location > input { width: 100%; box-sizing: border-box; }
 .saving-card, .saving-section { margin: 0; padding: 0; min-width: 0; border: 0; border-radius: 0; background: transparent; box-shadow: none; }
-.route-summary { margin-top: 28px; }
 .saving-card[aria-label='Save route'] { margin-top: 16px; }
 .saving-card summary { cursor: pointer; color: var(--accent-text); font-weight: 650; padding: 4px 0; }
 .saving-card summary:focus-visible, .saving-card button:focus-visible, .saving-section button:focus-visible,
@@ -23,8 +22,8 @@
 .saving-row, .saving-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
 .saving-row input, .saving-row select { flex: 1 1 140px; min-width: 0; }
 .saving-row > label { flex-basis: 100%; margin-bottom: 0; }
-.saving-card label, .saving-section label, .route-summary label { display: block; font-size: .85rem; font-weight: 600; margin-bottom: 6px; }
-.saving-card input, .saving-card select, .saving-section input, .saving-section select, .route-summary select { width: 100%; box-sizing: border-box; }
+.saving-card label, .saving-section label { display: block; font-size: .85rem; font-weight: 600; margin-bottom: 6px; }
+.saving-card input, .saving-card select, .saving-section input, .saving-section select { width: 100%; box-sizing: border-box; }
 .saving-card button, .saving-section button, .location-saving button { margin: 0; width: auto; min-height: 40px; padding: 8px 12px; }
 .saving-note { color: var(--ink-soft); font-size: .83rem; line-height: 1.5; margin: 8px 0 0; }
 .saving-error { color: var(--danger-ink); background: var(--danger-wash); border: 1px solid var(--danger-border-soft); padding: 10px; border-radius: 6px; line-height: 1.5; font-size: .85rem; overflow-wrap: anywhere; }
@@ -153,9 +152,6 @@ button:disabled { opacity: .55; cursor: not-allowed; }
 
 .list-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .planner .list-heading h2 { margin: 0; }
-.trip-save { margin-top: 20px; }
-.trip-save-form { margin-top: 10px; padding: 14px; border: 1px solid var(--accent-border); border-radius: var(--radius); background: var(--accent-wash); }
-.trip-save-form .saving-actions { margin-top: 10px; }
 
 /* In-place editing: text looks like text until edited; a dotted underline marks the live field. */
 .inline-edit { display: block; max-width: 100%; min-height: 0; margin: 0; padding: 1px 0; border: 0; border-radius: 0;
@@ -222,8 +218,6 @@ body.saved-suggestions-open .pac-container { display: none !important; }
   border-radius: var(--radius); background: var(--accent-wash); color: var(--ink-soft); font-size: .85rem; pointer-events: none; }
 
 /* Controls that swap state keep their size. */
-.label-row { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
-.label-row .saving-note { margin: 0; line-height: 1.2; }
 .location-saving .address-action > .address-save-toggle, .address-saved-mark { min-width: 72px; justify-content: center; }
 .inline-edit { border-bottom: 1px solid transparent; }
 

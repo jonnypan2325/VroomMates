@@ -99,7 +99,11 @@ class FirestoreSavedStore:
                 raise ValueError()
             decoded = json.loads(raw['snapshot_json'])
             if not isinstance(decoded, dict): raise ValueError()
-            return {'id': snapshot.id, 'title': raw['title'], 'created_at': _stamp(raw['created_at']), 'snapshot': decoded}
+            trip = {'id': snapshot.id, 'title': raw['title'], 'created_at': _stamp(raw['created_at']), 'snapshot': decoded}
+            # Trips saved before edit times have none.
+            if 'updated_at' in raw:
+                trip['updated_at'] = _stamp(raw['updated_at'])
+            return trip
         except (KeyError, TypeError, ValueError, RecursionError):
             raise StoreCorrupt() from None
 
@@ -142,26 +146,35 @@ class FirestoreSavedStore:
                     raise SaveConflict('record')
                 return existing, False
             inputs = record['snapshot']['inputs']
-            raw = {'title': record['title'], 'created_at': stamp, 'snapshot_json': encoded, 'schema_version': 1,
+            raw = {'title': record['title'], 'created_at': stamp, 'updated_at': stamp, 'snapshot_json': encoded, 'schema_version': 1,
                    'driver_count': len(inputs['drivers']), 'passenger_count': len(inputs['passengers'])}
+            # The list shows the arrive-by time, so it is copied beside the trip like the counts.
+            if 'arrive_by' in inputs:
+                raw['arrive_by'] = inputs['arrive_by']
             tx.create(ref, raw)
-            return dict(record, created_at=_stamp(stamp)), True
+            return dict(record, created_at=_stamp(stamp), updated_at=_stamp(stamp)), True
         return self._transaction(create)
 
     def update_trip(self, owner, ident, changes):
         changes = copy.deepcopy(changes)
         ref = self._account(owner).collection('trips').document(ident)
+        now = self.clock()
         def update(tx):
-            existing = self._trip(self._get(ref, tx))
-            raw = {}
+            found = self._get(ref, tx)
+            existing = self._trip(found)
+            stored = found.to_dict()
+            # Never record an edit as earlier than the creation or the last edit, even if clocks disagree.
+            stamp = max(now, stored['created_at'], stored.get('updated_at', stored['created_at']))
+            raw = {'updated_at': stamp}
             if 'title' in changes:
                 raw['title'] = changes['title']
             if 'snapshot' in changes:
                 inputs = changes['snapshot']['inputs']
                 raw.update(snapshot_json=_canonical(changes['snapshot']), driver_count=len(inputs['drivers']),
-                           passenger_count=len(inputs['passengers']))
+                           passenger_count=len(inputs['passengers']),
+                           arrive_by=inputs.get('arrive_by', firestore.DELETE_FIELD))
             tx.update(ref, raw)
-            return dict(existing, **changes)
+            return dict(existing, **changes, updated_at=_stamp(stamp))
         return self._transaction(update)
 
     def get_trip(self, owner, ident):
@@ -170,7 +183,7 @@ class FirestoreSavedStore:
 
     def list_trips(self, owner, limit, cursor=None):
         collection = self._account(owner).collection('trips')
-        query = collection.select(['title', 'created_at', 'schema_version', 'driver_count', 'passenger_count'])
+        query = collection.select(['title', 'created_at', 'updated_at', 'schema_version', 'driver_count', 'passenger_count', 'arrive_by'])
         query = query.order_by('created_at', direction=firestore.Query.DESCENDING).order_by(FieldPath.document_id(), direction=firestore.Query.DESCENDING)
         if cursor:
             stamp, ident = cursor
@@ -184,6 +197,10 @@ class FirestoreSavedStore:
                     summary = {k: raw[k] for k in ('title', 'schema_version', 'driver_count', 'passenger_count')}
                     if type(summary['schema_version']) is not int or summary['schema_version'] != 1: raise ValueError()
                     summary.update(id=row.id, created_at=_stamp(raw['created_at']))
+                    if 'arrive_by' in raw:
+                        summary['arrive_by'] = raw['arrive_by']
+                    if 'updated_at' in raw:
+                        summary['updated_at'] = _stamp(raw['updated_at'])
                 except (KeyError, TypeError, ValueError):
                     raise StoreCorrupt() from None
                 result.append(summary)

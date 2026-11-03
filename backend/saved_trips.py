@@ -1,11 +1,12 @@
 """Private immutable trip references; provider geometry stays outside persistence."""
+from datetime import datetime
 import re
 
 from flask import g, request
 
 from .auth import require_google_identity
 from .saved_api import (SavedRequestError, canonical_uuid, decode_trip_cursor,
-                        encode_trip_cursor, place_source, private_json,
+                        encode_trip_cursor, parse_stamp, place_source, private_json,
                         read_object, saved_errors, text)
 from .saved_store import SavedNotFound, StoreCorrupt
 
@@ -13,6 +14,7 @@ MAX_BODY_BYTES = 65536
 MAX_DRIVERS = 64
 MAX_PASSENGERS = 256
 _STOP_ID = re.compile(r"[A-Za-z0-9_-]{1,64}")
+_ARRIVE_BY = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}")
 
 
 class UnsupportedSnapshotVersion(ValueError):
@@ -30,11 +32,28 @@ def _stop_id(value):
     return value
 
 
-def _point(value, driver=False):
-    _fields(value, {'stop_id', 'source', 'capacity'} if driver else {'stop_id', 'source'}, {'label'})
+def _arrive_by(value):
+    """Wall-clock time at the destination, with no zone, so every device shows the same digits."""
+    if not isinstance(value, str) or not _ARRIVE_BY.fullmatch(value):
+        raise ValueError()
+    moment = datetime.strptime(value, '%Y-%m-%dT%H:%M')
+    if moment.strftime('%Y-%m-%dT%H:%M') != value or not 2000 <= moment.year <= 2100:
+        raise ValueError()
+    return value
+
+
+def _point(value, driver=False, person=True):
+    _fields(value, {'stop_id', 'source', 'capacity'} if driver else {'stop_id', 'source'},
+            {'label', 'location_id', 'person'} if person else {'label', 'location_id'})
     result = {'stop_id': _stop_id(value['stop_id']),
               'label': text(value.get('label', ''), 1000, 1000, allow_empty=True),
               'source': place_source(value['source'])}
+    if 'location_id' in value:
+        # A stop picked from My locations follows that location; absent on older trips.
+        result['location_id'] = canonical_uuid(value['location_id'])
+    if 'person' in value:
+        # Who is driven or picked up here, for this trip only; the place keeps its own label.
+        result['person'] = text(value['person'], 80, 320)
     if driver:
         capacity = value['capacity']
         if type(capacity) is not int or capacity <= 0:
@@ -51,14 +70,14 @@ def validate_snapshot(value):
     if value['schema_version'] != 1:
         raise UnsupportedSnapshotVersion()
     inputs = value['inputs']
-    _fields(inputs, {'drivers', 'passengers', 'destination'})
+    _fields(inputs, {'drivers', 'passengers', 'destination'}, {'arrive_by'})
     drivers, passengers = inputs['drivers'], inputs['passengers']
     if (not isinstance(drivers, list) or not 1 <= len(drivers) <= MAX_DRIVERS
             or not isinstance(passengers, list) or not 1 <= len(passengers) <= MAX_PASSENGERS):
         raise ValueError()
     drivers = [_point(row, driver=True) for row in drivers]
     passengers = [_point(row) for row in passengers]
-    destination = _point(inputs['destination'])
+    destination = _point(inputs['destination'], person=False)
     all_ids = [row['stop_id'] for row in drivers + passengers + [destination]]
     if len(set(all_ids)) != len(all_ids) or sum(row['capacity'] for row in drivers) < len(passengers):
         raise ValueError()
@@ -85,9 +104,10 @@ def validate_snapshot(value):
         normalized_routes.append({'driver_id': driver_id, 'stop_ids': stops})
     if seen != passenger_ids:
         raise ValueError()
-    return {'schema_version': 1,
-            'inputs': {'drivers': drivers, 'passengers': passengers, 'destination': destination},
-            'routes': normalized_routes}
+    normalized_inputs = {'drivers': drivers, 'passengers': passengers, 'destination': destination}
+    if 'arrive_by' in inputs:
+        normalized_inputs['arrive_by'] = _arrive_by(inputs['arrive_by'])
+    return {'schema_version': 1, 'inputs': normalized_inputs, 'routes': normalized_routes}
 
 
 def _create_record(value):
@@ -96,9 +116,18 @@ def _create_record(value):
             'snapshot': validate_snapshot(value['snapshot'])}
 
 
+def _edited(value):
+    """The optional last-edit time: a trip saved before edit times has none, and an edit never precedes creation."""
+    if 'updated_at' not in value:
+        return {}
+    if parse_stamp(value['updated_at']) < parse_stamp(value['created_at']):
+        raise ValueError()
+    return {'updated_at': value['updated_at']}
+
+
 def _public_record(value, expected_id=None):
     try:
-        _fields(value, {'id', 'title', 'created_at', 'snapshot'})
+        _fields(value, {'id', 'title', 'created_at', 'snapshot'}, {'updated_at'})
         record = _create_record({key: value[key] for key in ('id', 'title', 'snapshot')})
         encode_trip_cursor((value['created_at'], record['id']))
         if expected_id is not None and record['id'] != expected_id:
@@ -106,17 +135,20 @@ def _public_record(value, expected_id=None):
         # Stored canonical content is never silently normalized/repaired on load.
         if record != {key: value[key] for key in ('id', 'title', 'snapshot')}:
             raise ValueError()
-        return dict(record, created_at=value['created_at'])
+        return dict(record, created_at=value['created_at'], **_edited(value))
     except (ValueError, TypeError, KeyError):
         raise StoreCorrupt() from None
 
 
 def _summary(value):
     try:
-        _fields(value, {'id', 'title', 'created_at', 'schema_version', 'driver_count', 'passenger_count'})
+        _fields(value, {'id', 'title', 'created_at', 'schema_version', 'driver_count', 'passenger_count'}, {'arrive_by', 'updated_at'})
         ident = canonical_uuid(value['id'])
+        if 'arrive_by' in value:
+            _arrive_by(value['arrive_by'])
         title = text(value['title'], 200, 200)
         encode_trip_cursor((value['created_at'], ident))
+        _edited(value)
         if (title != value['title'] or type(value['schema_version']) is not int or value['schema_version'] != 1
                 or type(value['driver_count']) is not int or not 1 <= value['driver_count'] <= MAX_DRIVERS
                 or type(value['passenger_count']) is not int or not 1 <= value['passenger_count'] <= MAX_PASSENGERS):
