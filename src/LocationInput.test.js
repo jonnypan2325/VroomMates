@@ -455,6 +455,32 @@ test('an optimizer error page that is not JSON shows a service message, not a pa
   expect(screen.getByRole('alert')).not.toHaveTextContent('Unexpected token');
 });
 
+// Every browser words a network failure differently; the planner shows our own text, not the browser's.
+test('a calculation whose request cannot reach the server shows the service message, not the browser error', async () => {
+  show(); fillTrip(1);
+  fetch.mockRejectedValue(new TypeError('Failed to fetch'));
+  calculate();
+  expect(await screen.findByRole('alert')).toHaveTextContent('Could not reach the route optimizer. Please retry.');
+  expect(screen.getByRole('alert')).not.toHaveTextContent('Failed to fetch');
+});
+
+test('a server error string about the calculation shows as the failure message', async () => {
+  show(); fillTrip(1);
+  fetch.mockResolvedValue(reply(422, { error: 'This trip needs fewer stops.' }));
+  calculate();
+  expect(await screen.findByRole('alert')).toHaveTextContent('This trip needs fewer stops.');
+});
+
+test('a calculation aborted mid-flight stays silent when its request fails as aborted', async () => {
+  show(); fillTrip(1);
+  const pending = { promise: null }; pending.promise = new Promise((yes, no) => { pending.reject = no; });
+  fetch.mockReturnValue(pending.promise); calculate();
+  fill('Passengers at pickup 1', '2'); expect(fetch.mock.calls[0][1].signal.aborted).toBe(true);
+  await act(async () => pending.reject(new DOMException('The current route or account changed.', 'AbortError')));
+  expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  expect(calculateButton()).toBeEnabled();
+});
+
 test('a saved place that moves clears a route through it even when its new place cannot be looked up', async () => {
   resolvePlace.mockResolvedValue({ address: 'Home address', coordinates: { lat: 1, lng: 1 }, place_name: '', source: mockHome.source });
   const view = show();

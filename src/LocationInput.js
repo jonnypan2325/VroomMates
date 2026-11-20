@@ -393,7 +393,9 @@ export default function LocationInput({ map, auth }) {
       if (auth.status === 'authenticated') privateOwner.current = captured.owner;
       setResult(frozen);
     } catch (failure) {
-      if (current(captured) && failure.name !== 'AbortError') setError(failure.message || 'Could not reach the route optimizer. Please retry.');
+      // A request that cannot reach the server rejects with the browser's own TypeError; show our text instead.
+      if (current(captured) && failure.name !== 'AbortError') setError(failure instanceof TypeError || !failure.message
+        ? 'Could not reach the route optimizer. Please retry.' : failure.message);
     } finally {
       controllers.current.delete(controller);
       if (current(captured)) setBusy(false);
