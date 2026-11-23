@@ -176,6 +176,8 @@ backend is running. For local development, leave the value in `.env.example`
 
 ## Tests and production build
 
+GitHub Actions runs the same frontend tests, production build, and backend tests on every pull request and every push to `main`.
+
 Run the backend suite from an activated virtual environment:
 
 ```bash
@@ -333,6 +335,12 @@ Local integration tests explicitly opt into the loopback Firestore emulator with
 ```bash
 python -B -m tests.run_tests
 ```
+
+**Continuous integration:** `.github/workflows/ci.yml` runs the frontend tests and
+production build on Node 24 and the safe backend test runner on Python 3.10 for
+every pull request and every push to `main`. The frontend test step passes when
+no frontend test files exist yet, but runs any tests that are present. These jobs
+use placeholder frontend configuration only and do not require repository secrets.
 
 For the selected-adapter suite, start an official Firestore emulator bound to `127.0.0.1:8187` with project `demo-vroommates`, then run:
 
